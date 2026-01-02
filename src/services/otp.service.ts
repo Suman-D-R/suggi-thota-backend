@@ -31,6 +31,14 @@ setInterval(() => {
 
 // Generate and store OTP for a phone number
 export const generateAndStoreOTP = (phoneNumber: string): string => {
+  // Clear any existing OTP for this phone number first
+  // This ensures that when user requests a new OTP, the old one is invalidated
+  const hadExistingOTP = otpStore.has(phoneNumber);
+  if (hadExistingOTP) {
+    logger.info(`Clearing existing OTP for ${phoneNumber} before generating new one`);
+    otpStore.delete(phoneNumber);
+  }
+  
   const otpData = generateOTPData();
   const storedOTP: StoredOTP = {
     ...otpData,
@@ -42,13 +50,21 @@ export const generateAndStoreOTP = (phoneNumber: string): string => {
   // Store OTP (overwrite if exists)
   otpStore.set(phoneNumber, storedOTP);
   
-  logger.info(`OTP generated for ${phoneNumber}, expires at ${storedOTP.expiresAt}`);
+  logger.info(`OTP generated for ${phoneNumber}, expires at ${storedOTP.expiresAt}, hadExistingOTP: ${hadExistingOTP}`);
   
   return otpData.otp;
 };
 
 // Store Firebase sessionInfo for OTP verification
 export const storeFirebaseSession = (phoneNumber: string, sessionInfo: string): void => {
+  // Clear any existing OTP for this phone number first
+  // This ensures that when user requests a new OTP, the old one is invalidated
+  const hadExistingSession = otpStore.has(phoneNumber);
+  if (hadExistingSession) {
+    logger.info(`Clearing existing Firebase session for ${phoneNumber} before storing new one`);
+    otpStore.delete(phoneNumber);
+  }
+  
   const storedOTP: StoredOTP = {
     otp: '', // No OTP for Firebase, we verify via sessionInfo
     expiresAt: new Date(Date.now() + 10 * 60 * 1000), // 10 minutes
@@ -60,22 +76,26 @@ export const storeFirebaseSession = (phoneNumber: string, sessionInfo: string): 
   };
   
   otpStore.set(phoneNumber, storedOTP);
-  logger.info(`Firebase session stored for ${phoneNumber}`);
+  logger.info(`Firebase session stored for ${phoneNumber}, expires at ${storedOTP.expiresAt}, hadExistingSession: ${hadExistingSession}`);
 };
 
 // Get stored OTP for a phone number
 export const getStoredOTP = (phoneNumber: string): StoredOTP | null => {
   const stored = otpStore.get(phoneNumber);
   if (!stored) {
+    logger.debug(`No OTP stored for ${phoneNumber}`);
     return null;
   }
   
   // Check if expired
-  if (new Date() > stored.expiresAt) {
+  const now = new Date();
+  if (now > stored.expiresAt) {
+    logger.info(`OTP expired for ${phoneNumber}. Created at: ${stored.createdAt}, Expires at: ${stored.expiresAt}, Now: ${now}`);
     otpStore.delete(phoneNumber);
     return null;
   }
   
+  logger.debug(`OTP found for ${phoneNumber}, expires at: ${stored.expiresAt}, attempts: ${stored.attempts}`);
   return stored;
 };
 
@@ -84,11 +104,14 @@ export const verifyStoredOTP = (phoneNumber: string, inputOTP: string): {
   isValid: boolean;
   isExpired: boolean;
   maxAttemptsReached: boolean;
+  notFound: boolean; // New field to indicate OTP doesn't exist
 } => {
   const stored = getStoredOTP(phoneNumber);
   
   if (!stored) {
-    return { isValid: false, isExpired: true, maxAttemptsReached: false };
+    // Check if there was an OTP that expired or was never created
+    // We'll distinguish this in the controller
+    return { isValid: false, isExpired: false, maxAttemptsReached: false, notFound: true };
   }
   
   // Increment attempts
@@ -105,7 +128,7 @@ export const verifyStoredOTP = (phoneNumber: string, inputOTP: string): {
     otpStore.delete(phoneNumber);
   }
   
-  return result;
+  return { ...result, notFound: false };
 };
 
 // Delete OTP for a phone number (after successful verification)

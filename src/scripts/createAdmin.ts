@@ -12,7 +12,7 @@ const createAdmin = async () => {
     await connectDB();
 
     // Default admin credentials (can be changed via environment variables)
-    const adminEmail = process.env.ADMIN_EMAIL || 'admin@suggithota.com';
+    const adminEmail = process.env.ADMIN_EMAIL || 'admin@vitura.com';
     const adminPassword = process.env.ADMIN_PASSWORD || 'admin123';
     const adminName = process.env.ADMIN_NAME || 'Admin User';
     const adminPhone = process.env.ADMIN_PHONE || '+919999999999';

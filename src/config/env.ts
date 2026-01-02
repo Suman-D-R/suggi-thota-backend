@@ -10,7 +10,7 @@ export const envConfig = {
   NODE_ENV: process.env.NODE_ENV || 'development',
 
   // Database Configuration
-  MONGODB_URI: process.env.MONGODB_URI || 'mongodb://localhost:27017/suggi-thota',
+  MONGODB_URI: process.env.MONGODB_URI || 'mongodb://localhost:27017/vitura',
 
   // JWT Configuration
   JWT_SECRET: process.env.JWT_SECRET || 'your-super-secret-jwt-key',
@@ -20,14 +20,14 @@ export const envConfig = {
   AWS_ACCESS_KEY_ID: process.env.AWS_ACCESS_KEY_ID,
   AWS_SECRET_ACCESS_KEY: process.env.AWS_SECRET_ACCESS_KEY,
   AWS_REGION: process.env.AWS_REGION || 'us-east-1',
-  S3_BUCKET_NAME: process.env.S3_BUCKET_NAME || 'suggi-thota-bucket',
+  S3_BUCKET_NAME: process.env.S3_BUCKET_NAME || 'vitura-bucket',
 
   // Email Configuration
   EMAIL_HOST: process.env.EMAIL_HOST,
   EMAIL_PORT: parseInt(process.env.EMAIL_PORT || '587'),
   EMAIL_USER: process.env.EMAIL_USER,
   EMAIL_PASS: process.env.EMAIL_PASS,
-  EMAIL_FROM: process.env.EMAIL_FROM || 'noreply@suggithota.com',
+  EMAIL_FROM: process.env.EMAIL_FROM || 'noreply@vitura.com',
 
   // Google OAuth Configuration
   GOOGLE_CLIENT_ID: process.env.GOOGLE_CLIENT_ID,

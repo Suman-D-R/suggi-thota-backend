@@ -9,6 +9,7 @@ import orderRoutes from './order.routes';
 import addressRoutes from './address.routes';
 import deliveryRoutes from './delivery.routes';
 import heroBannerRoutes from './heroBanner.routes';
+import productBatchRoutes from './productBatch.routes';
 
 /**
  * Register all API routes with the Express app
@@ -19,7 +20,7 @@ export const registerRoutes = (app: Express): void => {
   app.get('/api', (req, res) => {
     res.json({
       success: true,
-      message: 'Suggi Thota API',
+      message: 'Vitura API',
       version: '1.0.0',
       documentation: '/api/docs',
     });
@@ -35,6 +36,7 @@ export const registerRoutes = (app: Express): void => {
   app.use('/api/addresses', addressRoutes);
   app.use('/api/deliveries', deliveryRoutes);
   app.use('/api/hero-banners', heroBannerRoutes);
+  app.use('/api/product-batches', productBatchRoutes);
 };
 
 // Export individual routes for direct access if needed
@@ -48,6 +50,7 @@ export {
   addressRoutes,
   deliveryRoutes,
   heroBannerRoutes,
+  productBatchRoutes,
 };
 
 export default registerRoutes;

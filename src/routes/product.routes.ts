@@ -39,8 +39,6 @@ router.post(
   requireAdmin as any,
   uploadProductImages,
   validators.productNameValidation('name'),
-  validators.priceValidation('price'),
-  validators.descriptionValidation('description'),
   validationMiddlewares.handleValidationErrors,
   productController.createProduct as any
 );

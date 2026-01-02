@@ -1,68 +1,31 @@
 // Product model
 import mongoose, { Document, Schema } from 'mongoose';
 
+export interface IProductVariant {
+  size: number;
+  unit: 'kg' | 'g' | 'liter' | 'ml' | 'piece' | 'pack' | 'dozen';
+  originalPrice?: number; // Price per variant (enriched from batches)
+  sellingPrice?: number; // Selling price per variant (enriched from batches)
+  discount?: number; // Discount per variant (enriched from batches)
+  stock?: number; // Stock available for this variant (enriched from batches)
+  isOutOfStock?: boolean; // Whether this variant is out of stock (enriched from batches)
+}
+
 export interface IProduct extends Document {
   _id: mongoose.Types.ObjectId;
   name: string;
-  description?: string;
   category: mongoose.Types.ObjectId | string;
-  subcategory?: mongoose.Types.ObjectId | string;
-
-  // Pricing
-  price: number;
-  originalPrice?: number;
-  discount?: number;
-  cost?: number; // Total product cost for profit/loss tracking
-
-  // Inventory
-  stock: number;
-  minStock: number;
-  maxStock: number;
-  sku: string;
-  barcode?: string;
-
-  // Images
+  size: number; // Deprecated: kept for backward compatibility
+  unit: 'kg' | 'g' | 'liter' | 'ml' | 'piece' | 'pack' | 'dozen'; // Deprecated: kept for backward compatibility
+  variants: IProductVariant[]; // New: array of size/unit combinations
   images: string[];
-  thumbnail?: string;
-
-  // Product details
-  brand?: string;
-  weight?: number;
-  unit: 'kg' | 'g' | 'liter' | 'ml' | 'piece' | 'pack' | 'dozen';
-  nutritionalInfo?: {
-    calories?: number;
-    protein?: number;
-    carbs?: number;
-    fat?: number;
-    fiber?: number;
-  };
-
-  // Tags and attributes
-  tags: string[];
   attributes: Map<string, string>;
-
-  // Status
   isActive: boolean;
-  isFeatured: boolean;
-  isOutOfStock: boolean;
-
-  // SEO (optional - for future web integration)
-  slug?: string;
-  metaTitle?: string;
-  metaDescription?: string;
-
-  // Ratings and reviews
-  averageRating: number;
-  totalReviews: number;
+  averageCostPerQuantity?: number; // Auto-calculated from batches
 
   // Timestamps
   createdAt: Date;
   updatedAt: Date;
-
-  // Virtuals
-  isOnSale?: boolean;
-  discountPercentage?: number;
-  categoryName?: string;
 }
 
 // Product schema
@@ -73,11 +36,6 @@ const productSchema = new Schema<IProduct>(
       required: true,
       trim: true,
       maxlength: 200,
-    },
-    description: {
-      type: String,
-      trim: true,
-      maxlength: 2000,
     },
     category: {
       type: Schema.Types.Mixed,
@@ -95,157 +53,67 @@ const productSchema = new Schema<IProduct>(
         message: 'Category must be a valid ObjectId or dummy ID ending with "-id"'
       }
     },
-    subcategory: {
-      type: Schema.Types.Mixed,
-      ref: 'Category',
-      validate: {
-        validator: function(value: any) {
-          if (!value) return true; // Allow null/undefined
-          // Allow ObjectId or dummy strings ending with '-id'
-          if (value instanceof mongoose.Types.ObjectId) return true;
-          if (typeof value === 'string') {
-            return value.endsWith('-id') || mongoose.Types.ObjectId.isValid(value);
-          }
-          return false;
-        },
-        message: 'Subcategory must be a valid ObjectId or dummy ID ending with "-id"'
-      }
-    },
-
-    // Pricing
-    price: {
+    size: {
       type: Number,
-      required: true,
-      min: 0,
-    },
-    originalPrice: {
-      type: Number,
-      min: 0,
-    },
-    discount: {
-      type: Number,
-      min: 0,
-      max: 100,
-    },
-    cost: {
-      type: Number,
-      min: 0,
-    },
-
-    // Inventory
-    stock: {
-      type: Number,
-      required: true,
-      min: 0,
-      default: 0,
-    },
-    minStock: {
-      type: Number,
-      min: 0,
-      default: 5,
-    },
-    maxStock: {
-      type: Number,
-      min: 0,
-    },
-    sku: {
-      type: String,
-      required: true,
-      unique: true,
-      uppercase: true,
-      trim: true,
-    },
-    barcode: {
-      type: String,
-      unique: true,
-      sparse: true,
-    },
-
-    // Images
-    images: [{
-      type: String,
-    }],
-    thumbnail: {
-      type: String,
-    },
-
-    // Product details
-    brand: {
-      type: String,
-      trim: true,
-      maxlength: 100,
-    },
-    weight: {
-      type: Number,
+      required: false, // Made optional for backward compatibility
       min: 0,
     },
     unit: {
       type: String,
       enum: ['kg', 'g', 'liter', 'ml', 'piece', 'pack', 'dozen'],
+      required: false, // Made optional for backward compatibility
+    },
+    variants: {
+      type: [
+        {
+          size: {
+            type: Number,
+            required: true,
+            min: 0,
+          },
+          unit: {
+            type: String,
+            enum: ['kg', 'g', 'liter', 'ml', 'piece', 'pack', 'dozen'],
+            required: true,
+          },
+        },
+      ],
+      default: [],
+      validate: {
+        validator: function(value: IProductVariant[]) {
+          // At least one variant is required if size/unit are not provided
+          if (!this.size || !this.unit) {
+            return Array.isArray(value) && value.length > 0;
+          }
+          return true;
+        },
+        message: 'At least one variant is required when size/unit are not provided',
+      },
+    },
+    images: {
+      type: [String],
       required: true,
+      validate: {
+        validator: function(value: string[]) {
+          return Array.isArray(value) && value.length > 0;
+        },
+        message: 'At least one image is required'
+      }
     },
-    nutritionalInfo: {
-      calories: { type: Number, min: 0 },
-      protein: { type: Number, min: 0 },
-      carbs: { type: Number, min: 0 },
-      fat: { type: Number, min: 0 },
-      fiber: { type: Number, min: 0 },
-    },
-
-    // Tags and attributes
-    tags: [{
-      type: String,
-      trim: true,
-      lowercase: true,
-    }],
     attributes: {
       type: Map,
       of: String,
+      required: true,
       default: new Map(),
     },
-
-    // Status
     isActive: {
       type: Boolean,
       default: true,
     },
-    isFeatured: {
-      type: Boolean,
-      default: false,
-    },
-    isOutOfStock: {
-      type: Boolean,
-      default: false,
-    },
-
-    // SEO (optional - for future web integration)
-    slug: {
-      type: String,
-      unique: true,
-      sparse: true,
-      lowercase: true,
-      trim: true,
-    },
-    metaTitle: {
-      type: String,
-      maxlength: 60,
-    },
-    metaDescription: {
-      type: String,
-      maxlength: 160,
-    },
-
-    // Ratings
-    averageRating: {
+    averageCostPerQuantity: {
       type: Number,
-      min: 0,
-      max: 5,
       default: 0,
-    },
-    totalReviews: {
-      type: Number,
       min: 0,
-      default: 0,
     },
   },
   {
@@ -255,64 +123,29 @@ const productSchema = new Schema<IProduct>(
   }
 );
 
-// Indexes
-productSchema.index({ name: 'text', description: 'text' });
-productSchema.index({ category: 1 });
-productSchema.index({ subcategory: 1 });
-productSchema.index({ price: 1 });
-productSchema.index({ isActive: 1 });
-productSchema.index({ isFeatured: 1 });
-productSchema.index({ isOutOfStock: 1 });
-productSchema.index({ tags: 1 });
-productSchema.index({ averageRating: -1 });
-productSchema.index({ createdAt: -1 });
-
-// Virtuals
-productSchema.virtual('isOnSale').get(function () {
-  return this.discount && this.discount > 0;
-});
-
-productSchema.virtual('discountPercentage').get(function () {
-  if (this.discount && this.originalPrice) {
-    return Math.round((this.discount / this.originalPrice) * 100);
+// Pre-save hook: Ensure backward compatibility
+productSchema.pre('save', function(next) {
+  // If variants array is empty but size/unit are provided, create a variant from them
+  if ((!this.variants || this.variants.length === 0) && this.size && this.unit) {
+    this.variants = [{ size: this.size, unit: this.unit }];
   }
-  return 0;
-});
-
-productSchema.virtual('categoryName', {
-  ref: 'Category',
-  localField: 'category',
-  foreignField: '_id',
-  justOne: true,
-  options: { select: 'name' },
-});
-
-// Pre-save middleware
-productSchema.pre('save', function (next) {
-  const product = this as IProduct;
-
-  // Generate slug if not provided (for web integration)
-  if (product.isModified('name') && !product.slug) {
-    product.slug = product.name
-      .toLowerCase()
-      .replace(/[^a-z0-9]+/g, '-')
-      .replace(/^-+|-+$/g, '');
+  // If variants exist but size/unit are not set, set them from the first variant
+  if (this.variants && this.variants.length > 0 && (!this.size || !this.unit)) {
+    this.size = this.variants[0].size;
+    this.unit = this.variants[0].unit;
   }
-
-  // Update out of stock status
-  product.isOutOfStock = product.stock <= 0;
-
-  // Set thumbnail from first image if not set
-  if (product.images.length > 0 && !product.thumbnail) {
-    product.thumbnail = product.images[0];
-  }
-
   next();
 });
 
+// Indexes
+productSchema.index({ name: 'text' });
+productSchema.index({ category: 1 });
+productSchema.index({ isActive: 1 });
+productSchema.index({ createdAt: -1 });
+
 // Static methods
 productSchema.statics.findActive = function () {
-  return this.find({ isActive: true, isOutOfStock: false });
+  return this.find({ isActive: true });
 };
 
 productSchema.statics.findByCategory = function (categoryId: string) {
@@ -326,49 +159,11 @@ productSchema.statics.findByCategory = function (categoryId: string) {
   return this.find(filter);
 };
 
-productSchema.statics.findBySlug = function (slug: string) {
-  return this.findOne({ slug, isActive: true });
-};
-
-productSchema.statics.findFeatured = function () {
-  return this.find({ isFeatured: true, isActive: true, isOutOfStock: false });
-};
-
-productSchema.statics.findOnSale = function () {
-  return this.find({
-    discount: { $gt: 0 },
-    isActive: true,
-    isOutOfStock: false
-  });
-};
-
 productSchema.statics.searchProducts = function (query: string) {
   return this.find({
     $text: { $search: query },
     isActive: true,
   });
-};
-
-// Instance methods
-productSchema.methods.updateStock = async function (quantity: number): Promise<void> {
-  this.stock = Math.max(0, this.stock + quantity);
-  this.isOutOfStock = this.stock <= 0;
-  await this.save();
-};
-
-productSchema.methods.isLowStock = function (): boolean {
-  return this.stock <= this.minStock;
-};
-
-productSchema.methods.getPrice = function (): number {
-  return this.price;
-};
-
-productSchema.methods.getDiscountedPrice = function (): number {
-  if (this.discount && this.originalPrice) {
-    return this.originalPrice - (this.originalPrice * this.discount / 100);
-  }
-  return this.price;
 };
 
 // Export the model

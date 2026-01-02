@@ -29,8 +29,8 @@ export const generateAccessToken = (payload: Omit<JWTPayload, 'type'>): string =
 
     return jwt.sign(accessTokenPayload, envConfig.JWT_SECRET, {
       expiresIn: '24h', // 24 hours
-      issuer: 'suggi-thota-backend',
-      audience: 'suggi-thota-users',
+      issuer: 'vitura-backend',
+      audience: 'vitura-users',
     });
   } catch (error) {
     logger.error('Error generating access token:', error);
@@ -48,8 +48,8 @@ export const generateRefreshToken = (payload: Omit<JWTPayload, 'type'>): string 
 
     return jwt.sign(refreshTokenPayload, envConfig.JWT_REFRESH_SECRET, {
       expiresIn: '7d', // 7 days
-      issuer: 'suggi-thota-backend',
-      audience: 'suggi-thota-users',
+      issuer: 'vitura-backend',
+      audience: 'vitura-users',
     });
   } catch (error) {
     logger.error('Error generating refresh token:', error);
@@ -72,8 +72,8 @@ export const generateTokens = (payload: Omit<JWTPayload, 'type'>) => {
 export const verifyAccessToken = (token: string): AccessTokenPayload | null => {
   try {
     const decoded = jwt.verify(token, envConfig.JWT_SECRET, {
-      issuer: 'suggi-thota-backend',
-      audience: 'suggi-thota-users',
+      issuer: 'vitura-backend',
+      audience: 'vitura-users',
     }) as AccessTokenPayload;
 
     if (decoded.type !== 'access') {
@@ -91,8 +91,8 @@ export const verifyAccessToken = (token: string): AccessTokenPayload | null => {
 export const verifyRefreshToken = (token: string): RefreshTokenPayload | null => {
   try {
     const decoded = jwt.verify(token, envConfig.JWT_REFRESH_SECRET, {
-      issuer: 'suggi-thota-backend',
-      audience: 'suggi-thota-users',
+      issuer: 'vitura-backend',
+      audience: 'vitura-users',
     }) as RefreshTokenPayload;
 
     if (decoded.type !== 'refresh') {

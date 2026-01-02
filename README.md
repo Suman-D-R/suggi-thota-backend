@@ -1,6 +1,6 @@
-# Suggi Thota Backend API
+# Vitura Backend API
 
-A production-ready backend API for the Suggi Thota grocery delivery application, built with Node.js, Express, TypeScript, and MongoDB.
+A production-ready backend API for the Vitura grocery delivery application, built with Node.js, Express, TypeScript, and MongoDB.
 
 ## 🚀 Features
 
@@ -121,7 +121,7 @@ src/
 1. **Clone the repository**
    ```bash
    git clone <repository-url>
-   cd suggi-thota-exp
+   cd vitura-exp
    ```
 
 2. **Install dependencies**
@@ -141,7 +141,7 @@ src/
    PORT=3000
 
    # Database
-   MONGODB_URI=mongodb://localhost:27017/suggi-thota
+   MONGODB_URI=mongodb://localhost:27017/vitura
 
    # JWT
    JWT_SECRET=your-super-secret-jwt-key
@@ -335,7 +335,7 @@ CMD ["npm", "start"]
 ### PM2 Deployment
 ```bash
 npm install -g pm2
-pm2 start dist/server.js --name "suggi-thota-api"
+pm2 start dist/server.js --name "vitura-api"
 ```
 
 ## 🔒 Security Features
@@ -374,4 +374,4 @@ For support and questions, please contact the development team or create an issu
 
 ---
 
-**Built with ❤️ for Suggi Thota - Fresh groceries delivered to your doorstep!**
+**Built with ❤️ for Vitura - Fresh groceries delivered to your doorstep!**

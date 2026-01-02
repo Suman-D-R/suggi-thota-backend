@@ -81,21 +81,27 @@ export const verifyFirebaseToken = async (req: Request, res: Response): Promise<
     const isNewUser = !user;
 
     if (isNewUser) {
-      // For Google login, name should be available from token, but if not, require it
-      if (!userName || userName.trim().length === 0) {
-        responseUtils.badRequestResponse(
-          res,
-          'Name is required for new users. Please provide your name.',
-          { requiresName: true }
-        );
-        return;
+      // For Google login, use email or phone as name if name is not available from token
+      let finalUserName = userName?.trim();
+      if (!finalUserName || finalUserName.length === 0) {
+        // Use email if available, otherwise use phone number
+        if (userEmail) {
+          finalUserName = userEmail.split('@')[0]; // Use part before @ as name
+        } else if (userPhone) {
+          // Extract last 10 digits from phone number
+          const phoneDigits = userPhone.replace(/\D/g, '');
+          finalUserName = phoneDigits.slice(-10) || userPhone;
+        } else {
+          finalUserName = 'User'; // Fallback
+        }
+        getLogger().info(`No name provided for new Google user, using: ${finalUserName}`);
       }
 
       // Create new user with Google authentication
       user = new User({
         phone: userPhone,
         email: userEmail?.toLowerCase(),
-        name: userName.trim(),
+        name: finalUserName,
         authMethod: AUTH_METHODS.GOOGLE,
         googleId: firebaseGoogleId,
         isVerified: true,
@@ -252,7 +258,10 @@ export const verifyOTP = async (req: Request, res: Response): Promise<void> => {
   try {
     const { phoneNumber, otp, email, name } = req.body;
 
+    getLogger().info(`Verify OTP request received for ${phoneNumber}, OTP length: ${otp?.length}`);
+
     if (!phoneNumber || !otp) {
+      getLogger().warn('Verify OTP: Missing phoneNumber or OTP in request');
       responseUtils.badRequestResponse(res, 'Phone number and OTP are required');
       return;
     }
@@ -260,28 +269,65 @@ export const verifyOTP = async (req: Request, res: Response): Promise<void> => {
     // Check if this is a Firebase OTP or custom OTP
     const storedOTP = otpService.getStoredOTP(phoneNumber);
     
+    getLogger().info(`Verify OTP: Stored OTP found: ${!!storedOTP}, isFirebase: ${storedOTP?.isFirebaseOTP}`);
+    
+    // If no OTP found at all (not expired, just doesn't exist)
+    if (!storedOTP) {
+      getLogger().warn(`No OTP found for ${phoneNumber}. User may have requested a new OTP or OTP was never sent.`);
+      responseUtils.badRequestResponse(
+        res, 
+        'No active OTP found for this phone number. Please request a new OTP.'
+      );
+      return;
+    }
+    
     let idToken: string | undefined;
     
     // If Firebase OTP, verify using Firebase
-    if (storedOTP?.isFirebaseOTP && storedOTP.sessionInfo) {
+    if (storedOTP.isFirebaseOTP && storedOTP.sessionInfo) {
       try {
         idToken = await firebaseOTPService.verifyFirebaseOTP(phoneNumber, otp, storedOTP.sessionInfo);
         getLogger().info(`Firebase OTP verified for ${phoneNumber}`);
       } catch (firebaseError: any) {
         getLogger().error('Firebase OTP verification failed:', firebaseError);
-        responseUtils.unauthorizedResponse(res, firebaseError.message || 'Invalid OTP. Please check and try again.');
+        
+        // Check if it's a session expired error
+        if (firebaseError.message?.includes('SESSION_EXPIRED') || 
+            firebaseError.message?.includes('expired') ||
+            firebaseError.message?.includes('invalid')) {
+          // Clear the expired session
+          otpService.deleteOTP(phoneNumber);
+          responseUtils.badRequestResponse(
+            res, 
+            'OTP session has expired or is invalid. Please request a new OTP.'
+          );
+        } else {
+          responseUtils.unauthorizedResponse(res, firebaseError.message || 'Invalid OTP. Please check and try again.');
+        }
         return;
       }
     } else {
       // Verify custom OTP
       const verificationResult = otpService.verifyStoredOTP(phoneNumber, otp);
 
+      // Handle case where OTP doesn't exist (shouldn't happen after our check above, but just in case)
+      if (verificationResult.notFound) {
+        responseUtils.badRequestResponse(
+          res, 
+          'No active OTP found for this phone number. Please request a new OTP.'
+        );
+        return;
+      }
+
       if (verificationResult.isExpired) {
+        // Clear expired OTP
+        otpService.deleteOTP(phoneNumber);
         responseUtils.badRequestResponse(res, 'OTP has expired. Please request a new OTP.');
         return;
       }
 
       if (verificationResult.maxAttemptsReached) {
+        // OTP is already deleted in verifyStoredOTP when max attempts reached
         responseUtils.badRequestResponse(res, 'Maximum OTP verification attempts reached. Please request a new OTP.');
         return;
       }
@@ -297,22 +343,21 @@ export const verifyOTP = async (req: Request, res: Response): Promise<void> => {
     const isNewUser = !user;
 
     if (isNewUser) {
-      // For new users, name is required
-      if (!name || name.trim().length === 0) {
-        // Return response indicating name is required
-        responseUtils.badRequestResponse(
-          res,
-          'Name is required for new users. Please provide your name.',
-          { requiresName: true }
-        );
-        return;
+      // For new users, use phone number as name if name is not provided
+      // Format phone number: remove + and country code, use last 10 digits
+      let userName = name?.trim();
+      if (!userName || userName.length === 0) {
+        // Extract last 10 digits from phone number (e.g., +919876543210 -> 9876543210)
+        const phoneDigits = phoneNumber.replace(/\D/g, ''); // Remove all non-digits
+        userName = phoneDigits.slice(-10) || phoneNumber; // Use last 10 digits or full number as fallback
+        getLogger().info(`No name provided for new user ${phoneNumber}, using phone number as name: ${userName}`);
       }
 
-      // Create new user with provided name
+      // Create new user with provided name or phone number as name
       user = new User({
         phone: phoneNumber,
         email: email?.toLowerCase(),
-        name: name.trim(),
+        name: userName,
         authMethod: AUTH_METHODS.OTP,
         isVerified: true,
         role: USER_ROLES.USER,
@@ -393,9 +438,24 @@ export const register = async (req: Request, res: Response): Promise<void> => {
       return;
     }
 
+    // Use email or phone as name if name is not provided
+    let userName = name?.trim();
+    if (!userName || userName.length === 0) {
+      if (email) {
+        userName = email.split('@')[0]; // Use part before @ as name
+      } else if (phone) {
+        // Extract last 10 digits from phone number
+        const phoneDigits = phone.replace(/\D/g, '');
+        userName = phoneDigits.slice(-10) || phone;
+      } else {
+        userName = 'User'; // Fallback
+      }
+      getLogger().info(`No name provided for new user registration, using: ${userName}`);
+    }
+
     // Create new user
     const user = new User({
-      name,
+      name: userName,
       email: email?.toLowerCase(),
       phone,
       password,

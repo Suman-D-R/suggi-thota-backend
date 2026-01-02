@@ -52,13 +52,13 @@ export const sendEmail = async (options: EmailOptions): Promise<void> => {
 
 // Send welcome email
 export const sendWelcomeEmail = async (email: string, name: string): Promise<void> => {
-  const subject = 'Welcome to Suggi Thota! 🛒';
+  const subject = 'Welcome to Vitura! 🛒';
   const html = `
     <!DOCTYPE html>
     <html>
     <head>
       <meta charset="utf-8">
-      <title>Welcome to Suggi Thota</title>
+      <title>Welcome to Vitura</title>
       <style>
         body { font-family: Arial, sans-serif; line-height: 1.6; color: #333; }
         .container { max-width: 600px; margin: 0 auto; padding: 20px; }
@@ -71,11 +71,11 @@ export const sendWelcomeEmail = async (email: string, name: string): Promise<voi
     <body>
       <div class="container">
         <div class="header">
-          <h1>🍎 Welcome to Suggi Thota!</h1>
+          <h1>🍎 Welcome to Vitura!</h1>
         </div>
         <div class="content">
           <h2>Hello ${name}!</h2>
-          <p>Thank you for joining Suggi Thota, your trusted partner for fresh vegetables and fruits delivered right to your doorstep.</p>
+          <p>Thank you for joining Vitura, your trusted partner for fresh vegetables and fruits delivered right to your doorstep.</p>
 
           <p>Here's what you can do with your account:</p>
           <ul>
@@ -93,7 +93,7 @@ export const sendWelcomeEmail = async (email: string, name: string): Promise<voi
           <p>Happy shopping! 🥕🥦🍅</p>
         </div>
         <div class="footer">
-          <p>© 2024 Suggi Thota. All rights reserved.</p>
+          <p>© 2024 Vitura. All rights reserved.</p>
           <p>This email was sent to ${email}</p>
         </div>
       </div>
@@ -110,7 +110,7 @@ export const sendWelcomeEmail = async (email: string, name: string): Promise<voi
 
 // Send OTP email
 export const sendOTPEmail = async (email: string, otp: string, expiryMinutes: number = 10): Promise<void> => {
-  const subject = 'Your Suggi Thota Verification Code';
+  const subject = 'Your Vitura Verification Code';
   const html = `
     <!DOCTYPE html>
     <html>
@@ -146,7 +146,7 @@ export const sendOTPEmail = async (email: string, otp: string, expiryMinutes: nu
           </div>
         </div>
         <div class="footer">
-          <p>© 2024 Suggi Thota. All rights reserved.</p>
+          <p>© 2024 Vitura. All rights reserved.</p>
           <p>This email was sent to ${email}</p>
         </div>
       </div>
@@ -236,10 +236,10 @@ export const sendOrderConfirmationEmail = async (
 
           <p>You can track your order status in the app. We'll send you updates as your order progresses.</p>
 
-          <p>Thank you for choosing Suggi Thota! 🥕🥦🍅</p>
+          <p>Thank you for choosing Vitura! 🥕🥦🍅</p>
         </div>
         <div class="footer">
-          <p>© 2024 Suggi Thota. All rights reserved.</p>
+          <p>© 2024 Vitura. All rights reserved.</p>
           <p>This email was sent to ${email}</p>
         </div>
       </div>
@@ -281,7 +281,7 @@ export const sendPasswordResetEmail = async (email: string, resetToken: string):
         </div>
         <div class="content">
           <h2>Reset Your Password</h2>
-          <p>You requested a password reset for your Suggi Thota account.</p>
+          <p>You requested a password reset for your Vitura account.</p>
           <p>Click the button below to reset your password:</p>
 
           <a href="${resetUrl}" class="button">Reset Password</a>
@@ -294,7 +294,7 @@ export const sendPasswordResetEmail = async (email: string, resetToken: string):
           <p style="word-break: break-all; color: #666; font-size: 12px;">${resetUrl}</p>
         </div>
         <div class="footer">
-          <p>© 2024 Suggi Thota. All rights reserved.</p>
+          <p>© 2024 Vitura. All rights reserved.</p>
           <p>This email was sent to ${email}</p>
         </div>
       </div>

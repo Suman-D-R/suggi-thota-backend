@@ -4,7 +4,7 @@
 
 1. **Navigate to backend directory:**
    ```bash
-   cd suggi-thota-exp
+   cd vitura-exp
    ```
 
 2. **Install dependencies (if not already done):**
@@ -52,11 +52,11 @@ mongosh --eval "db.adminCommand('ping')"
 ```
 
 ### Missing Environment Variables
-Create a `.env` file in `suggi-thota-exp/` directory with at minimum:
+Create a `.env` file in `vitura-exp/` directory with at minimum:
 ```env
 NODE_ENV=development
 PORT=3000
-MONGODB_URI=mongodb://localhost:27017/suggi-thota
+MONGODB_URI=mongodb://localhost:27017/vitura
 JWT_SECRET=your-super-secret-jwt-key
 JWT_REFRESH_SECRET=your-refresh-secret-key
 ```

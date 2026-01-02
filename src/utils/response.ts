@@ -132,7 +132,6 @@ export const paginatedResponse = <T = any>(
     total,
     totalPages,
   };
-
   return successResponse(res, message, data, statusCode, meta);
 };
 

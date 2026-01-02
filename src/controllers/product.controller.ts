@@ -3,6 +3,7 @@ import { Response } from 'express';
 import { Product } from '../models/product.model';
 import { Category } from '../models/category.model';
 import { responseUtils } from '../utils/response';
+import { enrichProducts, enrichProduct } from '../utils/productEnrichment';
 // Lazy import logger to avoid circular dependency
 let logger: any;
 const getLogger = () => {
@@ -59,9 +60,8 @@ const populateCategories = async (products: any[]): Promise<any[]> => {
 
   for (const product of products) {
     const hasDummyCategory = product.category && typeof product.category === 'string' && product.category.endsWith('-id');
-    const hasDummySubcategory = product.subcategory && typeof product.subcategory === 'string' && product.subcategory.endsWith('-id');
 
-    if (hasDummyCategory || hasDummySubcategory) {
+    if (hasDummyCategory) {
       dummyIdProducts.push(product);
     } else {
       realIdProducts.push(product);
@@ -72,8 +72,7 @@ const populateCategories = async (products: any[]): Promise<any[]> => {
   let populatedRealProducts: any[] = [];
   if (realIdProducts.length > 0) {
     populatedRealProducts = await Product.populate(realIdProducts, [
-      { path: 'category', select: 'name' },
-      { path: 'subcategory', select: 'name' }
+      { path: 'category', select: 'name' }
     ]);
   }
 
@@ -85,13 +84,6 @@ const populateCategories = async (products: any[]): Promise<any[]> => {
       productObj.category = {
         _id: productObj.category,
         name: getDummyCategoryName(productObj.category)
-      };
-    }
-
-    if (productObj.subcategory && typeof productObj.subcategory === 'string' && productObj.subcategory.endsWith('-id')) {
-      productObj.subcategory = {
-        _id: productObj.subcategory,
-        name: getDummyCategoryName(productObj.subcategory)
       };
     }
 
@@ -149,18 +141,12 @@ export const getAllProducts = async (req: AuthenticatedRequest, res: Response): 
     if (req.query.search) {
       filter.$or = [
         { name: { $regex: req.query.search, $options: 'i' } },
-        { description: { $regex: req.query.search, $options: 'i' } },
-        { sku: { $regex: req.query.search, $options: 'i' } },
       ];
     }
 
     // Filter by status
     if (req.query.isActive !== undefined) {
       filter.isActive = req.query.isActive === 'true';
-    }
-
-    if (req.query.isOutOfStock !== undefined) {
-      filter.isOutOfStock = req.query.isOutOfStock === 'true';
     }
 
     const [products, total] = await Promise.all([
@@ -175,10 +161,24 @@ export const getAllProducts = async (req: AuthenticatedRequest, res: Response): 
     // Populate categories (handles both real and dummy IDs)
     const populatedProducts = await populateCategories(products);
 
+    // Enrich products with batch data (pricing, stock, discount)
+    const enrichedProducts = await enrichProducts(populatedProducts);
+
+    // Ensure enriched fields are included in response (explicitly map to ensure serialization)
+    const productsWithEnrichment = enrichedProducts.map((product: any) => ({
+      ...product,
+      discount: product.discount ?? 0,
+      stock: product.stock ?? 0,
+      originalPrice: product.originalPrice ?? 0,
+      sellingPrice: product.sellingPrice ?? 0,
+      averageCostPerQuantity: product.averageCostPerQuantity ?? 0,
+      size: product.size ?? 0,
+    }));
+
     responseUtils.paginatedResponse(
       res,
       'Products retrieved successfully',
-      populatedProducts,
+      productsWithEnrichment,
       page,
       limit,
       total
@@ -210,7 +210,21 @@ export const getProductById = async (req: AuthenticatedRequest, res: Response): 
     const populatedProducts = await populateCategories([product]);
     const populatedProduct = populatedProducts[0];
 
-    responseUtils.successResponse(res, 'Product retrieved successfully', { product: populatedProduct });
+    // Enrich product with batch data (pricing, stock, discount)
+    const enrichedProduct = await enrichProduct(populatedProduct);
+
+    // Ensure enriched fields are included in response (explicitly map to ensure serialization)
+    const productWithEnrichment = {
+      ...enrichedProduct,
+      discount: enrichedProduct.discount ?? 0,
+      stock: enrichedProduct.stock ?? 0,
+      originalPrice: enrichedProduct.originalPrice ?? 0,
+      sellingPrice: enrichedProduct.sellingPrice ?? 0,
+      averageCostPerQuantity: enrichedProduct.averageCostPerQuantity ?? 0,
+      size: enrichedProduct.size ?? 0,
+    };
+
+    responseUtils.successResponse(res, 'Product retrieved successfully', { product: productWithEnrichment });
   } catch (error) {
     getLogger().error('Get product by ID error:', error);
     responseUtils.internalServerErrorResponse(res, 'Failed to retrieve product');
@@ -222,31 +236,17 @@ export const createProduct = async (req: AuthenticatedRequest, res: Response): P
   try {
     const {
       name,
-      description,
-      category,
-      subcategory,
-      price,
-      originalPrice,
-      discount,
-      cost,
-      stock,
-      minStock,
-      maxStock,
-      sku,
-      barcode,
-      thumbnail,
-      brand,
-      weight,
+      category: categoryRaw,
+      size,
       unit,
-      nutritionalInfo,
-      tags,
+      variants: variantsRaw,
+      images: imagesFromBody,
       attributes,
       isActive,
-      isFeatured,
-      slug,
-      metaTitle,
-      metaDescription,
     } = req.body;
+
+    // Handle category - if it's an array (from FormData), take the first value
+    const category = Array.isArray(categoryRaw) ? categoryRaw[0] : categoryRaw;
 
     // Get uploaded image URLs from multer
     let images: string[] = [];
@@ -270,14 +270,71 @@ export const createProduct = async (req: AuthenticatedRequest, res: Response): P
       });
     }
 
-    // Parse nutritionalInfo if it's a JSON string (from FormData)
-    let parsedNutritionalInfo = nutritionalInfo;
-    if (typeof nutritionalInfo === 'string') {
+    // Use images from body if no files uploaded
+    if (images.length === 0 && imagesFromBody) {
+      images = Array.isArray(imagesFromBody) ? imagesFromBody : [imagesFromBody];
+    }
+
+    // Validate images
+    if (!images || images.length === 0) {
+      responseUtils.badRequestResponse(res, 'At least one image is required');
+      return;
+    }
+
+    // Parse variants if provided
+    let parsedVariants: Array<{ size: number; unit: 'kg' | 'g' | 'liter' | 'ml' | 'piece' | 'pack' | 'dozen' }> = [];
+    if (variantsRaw) {
       try {
-        parsedNutritionalInfo = JSON.parse(nutritionalInfo);
+        const variantsData = typeof variantsRaw === 'string' ? JSON.parse(variantsRaw) : variantsRaw;
+        if (Array.isArray(variantsData) && variantsData.length > 0) {
+          parsedVariants = variantsData.map((v: any) => {
+            const unit = v.unit as string;
+            if (!['kg', 'g', 'liter', 'ml', 'piece', 'pack', 'dozen'].includes(unit)) {
+              throw new Error('Invalid unit');
+            }
+            return {
+              size: parseFloat(v.size),
+              unit: unit as 'kg' | 'g' | 'liter' | 'ml' | 'piece' | 'pack' | 'dozen',
+            };
+          });
+          // Validate variants
+          for (const variant of parsedVariants) {
+            if (isNaN(variant.size) || variant.size <= 0) {
+              responseUtils.badRequestResponse(res, 'All variant sizes must be positive numbers');
+              return;
+            }
+          }
+        }
       } catch (error) {
-        parsedNutritionalInfo = undefined;
+        responseUtils.badRequestResponse(res, 'Invalid variants format');
+        return;
       }
+    }
+
+    // Validate size (for backward compatibility) or variants
+    if (parsedVariants.length === 0) {
+      if (!size || isNaN(parseFloat(size as any)) || parseFloat(size as any) <= 0) {
+        responseUtils.badRequestResponse(res, 'Either size/unit or variants array is required');
+        return;
+      }
+      if (!unit || !['kg', 'g', 'liter', 'ml', 'piece', 'pack', 'dozen'].includes(unit)) {
+        responseUtils.badRequestResponse(res, 'Valid unit is required');
+        return;
+      }
+    }
+
+    // Parse attributes if it's a JSON string (from FormData)
+    let parsedAttributes = attributes;
+    if (typeof attributes === 'string') {
+      try {
+        parsedAttributes = JSON.parse(attributes);
+      } catch (error) {
+        parsedAttributes = {};
+      }
+    }
+    // Ensure attributes is always a Map/object
+    if (!parsedAttributes || typeof parsedAttributes !== 'object') {
+      parsedAttributes = {};
     }
 
     // Validate category exists
@@ -296,59 +353,28 @@ export const createProduct = async (req: AuthenticatedRequest, res: Response): P
       }
     }
 
-    // Validate subcategory if provided
-    if (subcategory) {
-      const isDummySubId = typeof subcategory === 'string' && subcategory.endsWith('-id');
-      if (!isDummySubId && !mongoose.Types.ObjectId.isValid(subcategory)) {
-        responseUtils.badRequestResponse(res, 'Invalid subcategory ID');
-        return;
-      }
-      if (!isDummySubId) {
-        const subcategoryExists = await Category.findById(subcategory);
-        if (!subcategoryExists) {
-          responseUtils.notFoundResponse(res, 'Subcategory not found');
-          return;
-        }
-      }
-    }
-
-    // Check if SKU already exists
-    const existingProduct = await Product.findOne({ sku: sku?.toUpperCase() });
-    if (existingProduct) {
-      responseUtils.conflictResponse(res, 'Product with this SKU already exists');
-      return;
-    }
-
     // Create product
-    const product = new Product({
+    const productData: any = {
       name,
-      description,
       category,
-      subcategory,
-      price,
-      originalPrice,
-      discount,
-      cost,
-      stock: stock || 0,
-      minStock: minStock || 5,
-      maxStock,
-      sku: sku?.toUpperCase(),
-      barcode,
       images,
-      thumbnail,
-      brand,
-      weight,
-      unit,
-      nutritionalInfo: parsedNutritionalInfo,
-      tags: tags || [],
-      attributes: attributes || {},
+      attributes: parsedAttributes,
       isActive: isActive !== undefined ? isActive : true,
-      isFeatured: isFeatured || false,
-      isOutOfStock: (stock || 0) <= 0,
-      slug,
-      metaTitle,
-      metaDescription,
-    });
+    };
+
+    // Set variants if provided, otherwise use size/unit for backward compatibility
+    if (parsedVariants.length > 0) {
+      productData.variants = parsedVariants;
+      // Set size/unit from first variant for backward compatibility
+      productData.size = parsedVariants[0].size;
+      productData.unit = parsedVariants[0].unit;
+    } else {
+      productData.size = parseFloat(size as any);
+      productData.unit = unit;
+      // Pre-save hook will create variant from size/unit
+    }
+
+    const product = new Product(productData);
 
     await product.save();
 
@@ -386,31 +412,50 @@ export const updateProduct = async (req: AuthenticatedRequest, res: Response): P
 
     const {
       name,
-      description,
-      category,
-      subcategory,
-      price,
-      originalPrice,
-      discount,
-      cost,
-      stock,
-      minStock,
-      maxStock,
-      sku,
-      barcode,
-      thumbnail,
-      brand,
-      weight,
+      category: categoryRaw,
+      size,
       unit,
-      nutritionalInfo,
-      tags,
+      variants: variantsRaw,
+      images: imagesFromBody,
       attributes,
       isActive,
-      isFeatured,
-      slug,
-      metaTitle,
-      metaDescription,
     } = req.body;
+
+    // Handle category - if it's an array (from FormData), take the first value
+    const category = Array.isArray(categoryRaw) ? categoryRaw[0] : categoryRaw;
+
+    // Parse variants if provided
+    let parsedVariants: Array<{ size: number; unit: 'kg' | 'g' | 'liter' | 'ml' | 'piece' | 'pack' | 'dozen' }> | undefined = undefined;
+    if (variantsRaw !== undefined) {
+      try {
+        const variantsData = typeof variantsRaw === 'string' ? JSON.parse(variantsRaw) : variantsRaw;
+        if (Array.isArray(variantsData) && variantsData.length > 0) {
+          parsedVariants = variantsData.map((v: any) => {
+            const unit = v.unit as string;
+            if (!['kg', 'g', 'liter', 'ml', 'piece', 'pack', 'dozen'].includes(unit)) {
+              throw new Error('Invalid unit');
+            }
+            return {
+              size: parseFloat(v.size),
+              unit: unit as 'kg' | 'g' | 'liter' | 'ml' | 'piece' | 'pack' | 'dozen',
+            };
+          });
+          // Validate variants
+          for (const variant of parsedVariants) {
+            if (isNaN(variant.size) || variant.size <= 0) {
+              responseUtils.badRequestResponse(res, 'All variant sizes must be positive numbers');
+              return;
+            }
+          }
+        } else if (Array.isArray(variantsData) && variantsData.length === 0) {
+          responseUtils.badRequestResponse(res, 'At least one variant is required');
+          return;
+        }
+      } catch (error) {
+        responseUtils.badRequestResponse(res, 'Invalid variants format');
+        return;
+      }
+    }
 
     // Get uploaded image URLs from multer (if any new files uploaded)
     let newImages: string[] = [];
@@ -434,13 +479,13 @@ export const updateProduct = async (req: AuthenticatedRequest, res: Response): P
       });
     }
 
-    // Parse nutritionalInfo if it's a JSON string (from FormData)
-    let parsedNutritionalInfo = nutritionalInfo;
-    if (typeof nutritionalInfo === 'string') {
+    // Parse attributes if it's a JSON string (from FormData)
+    let parsedAttributes = attributes;
+    if (typeof attributes === 'string') {
       try {
-        parsedNutritionalInfo = JSON.parse(nutritionalInfo);
+        parsedAttributes = JSON.parse(attributes);
       } catch (error) {
-        parsedNutritionalInfo = undefined;
+        parsedAttributes = undefined;
       }
     }
 
@@ -461,51 +506,53 @@ export const updateProduct = async (req: AuthenticatedRequest, res: Response): P
       product.category = category;
     }
 
-    // Validate subcategory if provided
-    if (subcategory !== undefined) {
-      if (subcategory === null) {
-        product.subcategory = undefined;
-      } else {
-        const isDummySubId = typeof subcategory === 'string' && subcategory.endsWith('-id');
-        if (!isDummySubId && !mongoose.Types.ObjectId.isValid(subcategory)) {
-          responseUtils.badRequestResponse(res, 'Invalid subcategory ID');
-          return;
-        }
-        if (!isDummySubId) {
-          const subcategoryExists = await Category.findById(subcategory);
-          if (!subcategoryExists) {
-            responseUtils.notFoundResponse(res, 'Subcategory not found');
-            return;
-          }
-        }
-        product.subcategory = subcategory;
-      }
-    }
-
-    // Check SKU uniqueness if changed
-    if (sku && sku.toUpperCase() !== product.sku) {
-      const existingProduct = await Product.findOne({ sku: sku.toUpperCase() });
-      if (existingProduct) {
-        responseUtils.conflictResponse(res, 'Product with this SKU already exists');
-        return;
-      }
-      product.sku = sku.toUpperCase();
-    }
-
     // Update fields
     if (name !== undefined) product.name = name;
-    if (description !== undefined) product.description = description;
-    if (price !== undefined) product.price = price;
-    if (originalPrice !== undefined) product.originalPrice = originalPrice;
-    if (discount !== undefined) product.discount = discount;
-    if (cost !== undefined) product.cost = cost;
-    if (stock !== undefined) {
-      product.stock = stock;
-      product.isOutOfStock = stock <= 0;
+    if (category !== undefined) {
+      const isDummyId = typeof category === 'string' && category.endsWith('-id');
+      if (!isDummyId && !mongoose.Types.ObjectId.isValid(category)) {
+        responseUtils.badRequestResponse(res, 'Invalid category ID');
+        return;
+      }
+      if (!isDummyId) {
+        const categoryExists = await Category.findById(category);
+        if (!categoryExists) {
+          responseUtils.notFoundResponse(res, 'Category not found');
+          return;
+        }
+      }
+      product.category = category;
     }
-    if (minStock !== undefined) product.minStock = minStock;
-    if (maxStock !== undefined) product.maxStock = maxStock;
-    if (barcode !== undefined) product.barcode = barcode;
+    // Handle variants update
+    if (parsedVariants !== undefined) {
+      product.variants = parsedVariants;
+      // Update size/unit from first variant for backward compatibility
+      if (parsedVariants.length > 0) {
+        product.size = parsedVariants[0].size;
+        product.unit = parsedVariants[0].unit;
+      }
+    } else {
+      // Handle size/unit update for backward compatibility
+      if (size !== undefined) {
+        const parsedSize = parseFloat(size as any);
+        if (isNaN(parsedSize) || parsedSize <= 0) {
+          responseUtils.badRequestResponse(res, 'Size must be a positive number');
+          return;
+        }
+        product.size = parsedSize;
+        // If variants exist, update first variant or create one
+        if (product.variants && product.variants.length > 0) {
+          product.variants[0].size = parsedSize;
+        }
+      }
+      if (unit !== undefined) {
+        product.unit = unit;
+        // If variants exist, update first variant or create one
+        if (product.variants && product.variants.length > 0) {
+          product.variants[0].unit = unit;
+        }
+      }
+    }
     // Update images only if new files were uploaded
     if (newImages.length > 0) {
       // Delete old images from S3 before updating
@@ -513,19 +560,23 @@ export const updateProduct = async (req: AuthenticatedRequest, res: Response): P
         await deleteOldImagesFromS3(product.images);
       }
       product.images = newImages;
+    } else if (imagesFromBody !== undefined) {
+      // Update images from body if provided
+      const updatedImages = Array.isArray(imagesFromBody) ? imagesFromBody : [imagesFromBody];
+      if (updatedImages.length === 0) {
+        responseUtils.badRequestResponse(res, 'At least one image is required');
+        return;
+      }
+      product.images = updatedImages;
     }
-    if (thumbnail !== undefined) product.thumbnail = thumbnail;
-    if (brand !== undefined) product.brand = brand;
-    if (weight !== undefined) product.weight = weight;
-    if (unit !== undefined) product.unit = unit;
-    if (parsedNutritionalInfo !== undefined) product.nutritionalInfo = parsedNutritionalInfo;
-    if (tags !== undefined) product.tags = tags;
-    if (attributes !== undefined) product.attributes = attributes;
+    if (parsedAttributes !== undefined) {
+      if (!parsedAttributes || typeof parsedAttributes !== 'object') {
+        responseUtils.badRequestResponse(res, 'Attributes must be a valid object');
+        return;
+      }
+      product.attributes = parsedAttributes;
+    }
     if (isActive !== undefined) product.isActive = isActive;
-    if (isFeatured !== undefined) product.isFeatured = isFeatured;
-    if (slug !== undefined) product.slug = slug;
-    if (metaTitle !== undefined) product.metaTitle = metaTitle;
-    if (metaDescription !== undefined) product.metaDescription = metaDescription;
 
     await product.save();
 

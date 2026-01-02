@@ -18,13 +18,13 @@ interface SMSOptions {
 // Message templates (for non-OTP messages)
 const messageTemplates = {
   orderConfirmation: (orderId: string, amount: number) =>
-    `Your order #${orderId} has been confirmed. Total amount: ₹${amount}. Thank you for shopping with Suggi Thota!`,
+    `Your order #${orderId} has been confirmed. Total amount: ₹${amount}. Thank you for shopping with Vitura!`,
 
   deliveryUpdate: (orderId: string, status: string) =>
     `Your order #${orderId} status has been updated to: ${status}. Track your order in the app.`,
 
   welcome: (name: string) =>
-    `Welcome to Suggi Thota, ${name}! Fresh vegetables and fruits delivered to your doorstep.`,
+    `Welcome to Vitura, ${name}! Fresh vegetables and fruits delivered to your doorstep.`,
 };
 
 // Send SMS (Optional - requires SMS provider)
@@ -38,7 +38,7 @@ export const sendSMS = async (options: SMSOptions): Promise<void> => {
 
 // Send OTP SMS
 export const sendOTPSMS = async (phone: string, otp: string, expiryMinutes: number = 10): Promise<void> => {
-  const message = `Your Suggi Thota verification code is ${otp}. This code will expire in ${expiryMinutes} minutes. Do not share this code with anyone.`;
+  const message = `Your Vitura verification code is ${otp}. This code will expire in ${expiryMinutes} minutes. Do not share this code with anyone.`;
   
   try {
     // In development, just log the OTP

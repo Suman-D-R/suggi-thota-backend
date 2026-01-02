@@ -18,10 +18,10 @@ interface WhatsAppOptions {
 // WhatsApp message templates (for non-OTP messages)
 const whatsappTemplates = {
   orderConfirmation: (orderId: string, amount: number) =>
-    `🛒 *Suggi Thota*\n\n✅ Your order *#${orderId}* has been confirmed!\n\n💰 Total amount: *₹${amount}*\n\nThank you for shopping with us!`,
+    `🛒 *Vitura*\n\n✅ Your order *#${orderId}* has been confirmed!\n\n💰 Total amount: *₹${amount}*\n\nThank you for shopping with us!`,
 
   deliveryUpdate: (orderId: string, status: string) =>
-    `🛒 *Suggi Thota*\n\n🚚 Your order *#${orderId}* status: *${status}*\n\nTrack your order in the app for real-time updates.`,
+    `🛒 *Vitura*\n\n🚚 Your order *#${orderId}* status: *${status}*\n\nTrack your order in the app for real-time updates.`,
 };
 
 // Send WhatsApp message (Optional - requires WhatsApp provider)
@@ -58,7 +58,7 @@ export const sendCustomWhatsAppMessage = async (phone: string, message: string):
 
 // Send welcome message via WhatsApp
 export const sendWelcomeWhatsApp = async (phone: string, name: string): Promise<void> => {
-  const body = `🛒 *Suggi Thota*\n\nWelcome ${name}! 🎉\n\nThank you for choosing Suggi Thota for your fresh vegetables and fruits delivery needs.\n\nHappy shopping! 🥕🥦🍅`;
+  const body = `🛒 *Vitura*\n\nWelcome ${name}! 🎉\n\nThank you for choosing Vitura for your fresh vegetables and fruits delivery needs.\n\nHappy shopping! 🥕🥦🍅`;
   await sendWhatsAppMessage({ to: phone, body });
 };
 
