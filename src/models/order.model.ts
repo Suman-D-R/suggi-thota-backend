@@ -1,11 +1,21 @@
 // Order model
 import mongoose, { Document, Schema } from 'mongoose';
 
+export interface IBatchSplit {
+  batch: mongoose.Types.ObjectId;
+  quantity: number;
+  sellingPrice: number;
+  costPrice: number;
+}
+
 export interface IOrderItem {
   product: mongoose.Types.ObjectId;
   quantity: number;
   price: number; // Price at the time of order
   total: number;
+  size?: number; // Variant size
+  unit?: string; // Variant unit
+  batchSplits?: IBatchSplit[]; // Batch allocation details for this item
 }
 
 export interface IOrder extends Document {
@@ -64,6 +74,33 @@ export interface IOrderModel extends mongoose.Model<IOrder> {
   getOrderStats(startDate?: Date, endDate?: Date): Promise<any[]>;
 }
 
+// Batch split sub-schema
+const batchSplitSchema = new Schema<IBatchSplit>(
+  {
+    batch: {
+      type: Schema.Types.ObjectId,
+      ref: 'ProductBatch',
+      required: true,
+    },
+    quantity: {
+      type: Number,
+      required: true,
+      min: 1,
+    },
+    sellingPrice: {
+      type: Number,
+      required: true,
+      min: 0,
+    },
+    costPrice: {
+      type: Number,
+      required: true,
+      min: 0,
+    },
+  },
+  { _id: false }
+);
+
 // Order item sub-schema
 const orderItemSchema = new Schema<IOrderItem>(
   {
@@ -87,6 +124,15 @@ const orderItemSchema = new Schema<IOrderItem>(
       required: true,
       min: 0,
     },
+    size: {
+      type: Number,
+      min: 0,
+    },
+    unit: {
+      type: String,
+      enum: ['kg', 'g', 'liter', 'ml', 'piece', 'pack', 'dozen'],
+    },
+    batchSplits: [batchSplitSchema],
   },
   { _id: false }
 );

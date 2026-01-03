@@ -207,6 +207,7 @@ export const addItem = async (req: Request, res: Response): Promise<void> => {
 // Update item quantity in cart
 export const updateItem = async (req: Request, res: Response): Promise<void> => {
   try {
+    console.log('addItem', req.body);
     const userId = (req as any).user?.userId;
     const { productId, size, unit, quantity } = req.body;
 
