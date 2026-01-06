@@ -9,6 +9,15 @@ import { uploadProductImages } from '../middlewares/upload.middleware';
 const router = Router();
 
 // Public routes (no auth required for browsing)
+// Get products by location (must come before general products route)
+router.get(
+  '/location',
+  validators.paginationValidation.page(),
+  validators.paginationValidation.limit(),
+  validationMiddlewares.handleValidationErrors,
+  productController.getProductsByLocation as any
+);
+
 router.get(
   '/',
   validators.paginationValidation.page(),

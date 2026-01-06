@@ -2,7 +2,9 @@
 import { Request, Response } from 'express';
 import { Cart } from '../models/cart.model';
 import { Product } from '../models/product.model';
-import { ProductBatch } from '../models/productBatch.model';
+import { StoreProduct } from '../models/storeProduct.model';
+import { Store } from '../models/store.model';
+import { InventoryBatch } from '../models/inventoryBatch.model';
 import { responseUtils } from '../utils/response';
 // Lazy import logger to avoid circular dependency
 let logger: any;
@@ -17,31 +19,112 @@ const getLogger = () => {
 export const getCart = async (req: Request, res: Response): Promise<void> => {
   try {
     const userId = (req as any).user?.userId;
+    const storeId = req.query.storeId as string;
 
     if (!userId) {
       responseUtils.unauthorizedResponse(res, 'User not authenticated');
       return;
     }
 
-    // Get or create cart for user
-    const cart = await Cart.getOrCreateCart(userId);
-    
-    // Populate product details
-    await cart.populate('items.product');
+    if (!storeId) {
+      responseUtils.badRequestResponse(res, 'Store ID is required');
+      return;
+    }
 
-    getLogger().info(`Cart retrieved for user ${userId}`);
+    // Get or create cart for user and store
+    let cart = await Cart.findOne({ userId, storeId });
+
+    if (!cart) {
+      cart = new Cart({ userId, storeId, items: [] });
+      await cart.save();
+    }
+
+    // Populate product details
+    await cart.populate('items.productId');
+    await cart.populate('storeId');
+
+    // Enrich items with product and store product details
+    // Format items to match frontend expectations: { product: {...}, variants: [{ size, unit, quantity, price }] }
+    const enrichedItems = await Promise.all(
+      cart.items.map(async (item: any) => {
+        const product = await Product.findById(item.productId);
+        const storeProduct = await StoreProduct.findOne({
+          storeId,
+          productId: item.productId,
+        }).populate('productId', 'name images');
+
+        if (!product) {
+          getLogger().warn(`Product not found for cart item: ${item.productId}`);
+          return null;
+        }
+
+        if (!storeProduct) {
+          getLogger().warn(`StoreProduct not found for cart item: ${item.productId}, store: ${storeId}`);
+          return null;
+        }
+
+        // Find the variant in storeProduct
+        const variant = storeProduct.variants.find((v: any) => v.sku === item.variantSku);
+        if (!variant) {
+          getLogger().warn(`Variant not found: ${item.variantSku} for product: ${item.productId}`);
+          return null;
+        }
+
+        // Build product variants array from storeProduct
+        const productVariants = storeProduct.variants.map((v: any) => ({
+          sku: v.sku,
+          size: v.size,
+          unit: v.unit,
+          originalPrice: v.mrp,
+          sellingPrice: v.sellingPrice,
+          discount: v.discount,
+          stock: 0, // Stock is managed separately
+          isAvailable: v.isAvailable,
+          isOutOfStock: !v.isAvailable,
+        }));
+
+        // Return in format expected by frontend: { product: {...}, variants: [{...}] }
+        return {
+          product: {
+            _id: product._id,
+            name: product.name,
+            originalPrice: variant.mrp || 0,
+            sellingPrice: variant.sellingPrice || 0,
+            unit: variant.unit || '',
+            size: variant.size || 0,
+            variants: productVariants,
+            category: product.category,
+            images: product.images || [],
+            discount: variant.discount || 0,
+            description: product.description,
+            isActive: storeProduct.isActive,
+            isFeatured: storeProduct.isFeatured || false,
+          },
+          variants: [
+            {
+              size: variant.size,
+              unit: variant.unit,
+              quantity: item.quantity,
+              price: variant.sellingPrice,
+            },
+          ],
+        };
+      })
+    );
+
+    // Filter out null items (products that weren't found)
+    const validItems = enrichedItems.filter((item: any) => item !== null);
+
+    getLogger().info(`Cart retrieved for user ${userId}, store ${storeId}`);
 
     responseUtils.successResponse(res, 'Cart retrieved successfully', {
       cart: {
         _id: cart._id,
-        items: cart.items.map((item: any) => ({
-          product: item.product,
-          variants: item.variants,
-          addedAt: item.addedAt,
-        })),
-        totalItems: cart.totalItems,
-        totalPrice: cart.totalPrice,
-        lastActivity: cart.lastActivity,
+        userId: cart.userId,
+        storeId: cart.storeId,
+        items: validItems,
+        createdAt: cart.createdAt,
+        updatedAt: cart.updatedAt,
       },
     });
   } catch (error) {
@@ -54,148 +137,158 @@ export const getCart = async (req: Request, res: Response): Promise<void> => {
 export const addItem = async (req: Request, res: Response): Promise<void> => {
   try {
     const userId = (req as any).user?.userId;
-    console.log('addItem', req.body);
-    const { productId, size, unit, quantity = 1, price } = req.body;
+    const { storeId, productId, variantSku, size, unit, quantity = 1 } = req.body;
 
     if (!userId) {
       responseUtils.unauthorizedResponse(res, 'User not authenticated');
       return;
     }
 
-    if (!productId) {
-      responseUtils.badRequestResponse(res, 'Product ID is required');
+    // Construct variantSku from size and unit if not provided
+    let finalVariantSku = variantSku;
+    if (!finalVariantSku && size !== undefined && unit) {
+      finalVariantSku = `${size}_${unit}`;
+    }
+
+    if (!storeId || !productId || !finalVariantSku) {
+      responseUtils.badRequestResponse(res, 'Store ID, product ID, and variant SKU (or size and unit) are required');
       return;
     }
 
-    if (!price || price < 0) {
-      responseUtils.badRequestResponse(res, 'Valid price is required');
+    // Verify store exists
+    const store = await Store.findById(storeId);
+    if (!store || !store.isActive) {
+      responseUtils.notFoundResponse(res, 'Store not found or inactive');
       return;
     }
 
-    // Verify product exists and is active
+    // Verify product exists
     const product = await Product.findById(productId);
-    if (!product || !product.isActive) {
-      responseUtils.notFoundResponse(res, 'Product not found or inactive');
+    if (!product) {
+      responseUtils.notFoundResponse(res, 'Product not found');
       return;
     }
 
-    // Fetch batches to check available variants
-    const batches = await ProductBatch.find({ product: productId }).lean();
-    const batchesWithVariants = batches.filter(
-      (batch: any) => batch.sellingVariants && Array.isArray(batch.sellingVariants) && batch.sellingVariants.length > 0
-    );
-
-    // Collect all available variants from batches
-    const availableVariants = new Map<string, { size: number; unit: string }>();
-    batchesWithVariants.forEach((batch: any) => {
-      batch.sellingVariants.forEach((sv: any) => {
-        const key = `${sv.sellingSize}_${sv.sellingUnit}`;
-        if (!availableVariants.has(key)) {
-          availableVariants.set(key, { 
-            size: Number(sv.sellingSize), 
-            unit: String(sv.sellingUnit).toLowerCase() 
-          });
-        }
-      });
+    // Verify store product exists and is active
+    const storeProduct = await StoreProduct.findOne({
+      storeId,
+      productId,
+      isActive: true,
     });
 
-    // Also check product.variants for backward compatibility
-    if (product.variants && Array.isArray(product.variants)) {
-      product.variants.forEach((v: any) => {
-        const key = `${v.size}_${v.unit}`;
-        if (!availableVariants.has(key)) {
-          availableVariants.set(key, { 
-            size: Number(v.size), 
-            unit: String(v.unit).toLowerCase() 
-          });
-        }
-      });
-    }
-    
-    // Check product-level size/unit for backward compatibility
-    if (product.size && product.unit) {
-      const key = `${product.size}_${product.unit}`;
-      if (!availableVariants.has(key)) {
-        availableVariants.set(key, { 
-          size: Number(product.size), 
-          unit: String(product.unit).toLowerCase() 
-        });
-      }
-    }
-
-    // Handle variant selection based on product structure
-    let finalSize: number;
-    let finalUnit: string;
-
-    // Case 1: Variant provided in request
-    if (size !== undefined && unit !== undefined) {
-      // Ensure size is a number for comparison
-      const sizeNum = typeof size === 'string' ? parseFloat(size) : Number(size);
-      const unitLower = String(unit).toLowerCase();
-      
-      // Validate variant exists in available variants (from batches or product)
-      const variantKey = `${sizeNum}_${unitLower}`;
-      const variantExists = availableVariants.has(variantKey);
-
-      if (!variantExists) {
-        const availableVariantList = Array.from(availableVariants.values())
-          .map((v: any) => `${v.size}${v.unit}`)
-          .join(', ');
-        getLogger().warn(`Invalid variant for product ${productId}: size=${sizeNum}, unit=${unit}. Available variants: ${availableVariantList || 'none'}`);
-        responseUtils.badRequestResponse(res, `Invalid variant for this product. Available variants: ${availableVariantList || 'none'}`);
-        return;
-      }
-
-      finalSize = sizeNum;
-      finalUnit = unitLower;
-    }
-    // Case 2: Only one available variant - auto-select
-    else if (availableVariants.size === 1) {
-      const onlyVariant = Array.from(availableVariants.values())[0];
-      finalSize = onlyVariant.size;
-      finalUnit = onlyVariant.unit;
-    }
-    // Case 3: Multiple variants - require selection
-    else if (availableVariants.size > 1) {
-      const availableVariantList = Array.from(availableVariants.values())
-        .map((v: any) => `${v.size}${v.unit}`)
-        .join(', ');
-      responseUtils.badRequestResponse(
-        res,
-        `Variant selection required. Product has multiple variants. Please provide size and unit. Available variants: ${availableVariantList}`
-      );
+    if (!storeProduct) {
+      responseUtils.badRequestResponse(res, `Product is not available at this store`);
       return;
     }
-    // Case 4: No variant information available
-    else {
-      responseUtils.badRequestResponse(res, 'Product does not have valid variant information');
+
+    // Find the variant in the store product
+    const variant = storeProduct.variants.find((v) => v.sku === finalVariantSku);
+    if (!variant) {
+      responseUtils.badRequestResponse(res, `Variant with SKU ${finalVariantSku} is not available for this product at this store`);
+      return;
+    }
+
+    if (!variant.isAvailable) {
+      responseUtils.badRequestResponse(res, `Variant with SKU ${finalVariantSku} is not available`);
+      return;
+    }
+
+    // Check stock from InventoryBatches (stock is not stored in StoreProduct)
+    // First, check if product uses shared stock
+    const allProductBatches = await InventoryBatch.find({
+      storeId,
+      productId,
+      status: 'active',
+    });
+
+    // Check if any batch uses shared stock
+    const hasSharedStock = allProductBatches.some((batch: any) => batch.usesSharedStock === true);
+
+    let batches: any[];
+    if (hasSharedStock) {
+      // Shared stock: Get all active shared stock batches (ignore variantSku)
+      batches = allProductBatches.filter((batch: any) => {
+        const isExpired = batch.expiryDate && new Date() > batch.expiryDate;
+        return batch.usesSharedStock === true && !isExpired;
+      });
+    } else {
+      // Variant-specific stock: Get batches matching the variant SKU
+      batches = allProductBatches.filter((batch: any) => {
+        const isExpired = batch.expiryDate && new Date() > batch.expiryDate;
+        return batch.variantSku === finalVariantSku && !isExpired;
+      });
+    }
+
+    const totalStock = batches.reduce((sum: number, batch: any) => {
+      return sum + (batch.availableQuantity || 0);
+    }, 0);
+
+    if (totalStock < quantity) {
+      responseUtils.badRequestResponse(res, `Insufficient stock. Available: ${totalStock}`);
       return;
     }
 
     // Get or create cart
-    const cart = await Cart.getOrCreateCart(userId);
+    let cart = await Cart.findOne({ userId, storeId });
 
-    // Add item to cart with variant
-    await cart.addItem(productId, finalSize, finalUnit, quantity, price);
+    if (!cart) {
+      cart = new Cart({ userId, storeId, items: [] });
+      await cart.save();
+    }
 
-    // Refresh cart to get updated totals
-    await cart.populate('items.product');
+    // Check if item already exists in cart
+    const existingItemIndex = cart.items.findIndex(
+      (item) => item.productId.toString() === productId && item.variantSku === finalVariantSku
+    );
+
+    if (existingItemIndex > -1) {
+      // Update quantity
+      cart.items[existingItemIndex].quantity += quantity;
+    } else {
+      // Add new item
+      cart.items.push({
+        productId: new (require('mongoose').Types.ObjectId)(productId),
+        variantSku: finalVariantSku,
+        quantity,
+      });
+    }
+
+    await cart.save();
+
+    // Populate and enrich
+    await cart.populate('items.productId');
+    await cart.populate('storeId');
+
+    const enrichedItems = await Promise.all(
+      cart.items.map(async (item: any) => {
+        const sp = await StoreProduct.findOne({
+          storeId,
+          productId: item.productId,
+          variantSku: item.variantSku,
+        }).populate('productId', 'name images');
+
+        return {
+          productId: item.productId,
+          variantSku: item.variantSku,
+          quantity: item.quantity,
+          product: item.productId,
+          storeProduct: sp || null,
+        };
+      })
+    );
 
     getLogger().info(
-      `Item added to cart for user ${userId}: ${productId}, variant: ${finalSize}${finalUnit}`
+      `Item added to cart for user ${userId}: ${productId}, variant: ${finalVariantSku}, store: ${storeId}`
     );
 
     responseUtils.successResponse(res, 'Item added to cart successfully', {
       cart: {
         _id: cart._id,
-        items: cart.items.map((item: any) => ({
-          product: item.product,
-          variants: item.variants,
-          addedAt: item.addedAt,
-        })),
-        totalItems: cart.totalItems,
-        totalPrice: cart.totalPrice,
-        lastActivity: cart.lastActivity,
+        userId: cart.userId,
+        storeId: cart.storeId,
+        items: enrichedItems,
+        createdAt: cart.createdAt,
+        updatedAt: cart.updatedAt,
       },
     });
   } catch (error) {
@@ -207,22 +300,22 @@ export const addItem = async (req: Request, res: Response): Promise<void> => {
 // Update item quantity in cart
 export const updateItem = async (req: Request, res: Response): Promise<void> => {
   try {
-    console.log('addItem', req.body);
     const userId = (req as any).user?.userId;
-    const { productId, size, unit, quantity } = req.body;
+    const { storeId, productId, variantSku, size, unit, quantity } = req.body;
 
     if (!userId) {
       responseUtils.unauthorizedResponse(res, 'User not authenticated');
       return;
     }
 
-    if (!productId || quantity === undefined) {
-      responseUtils.badRequestResponse(res, 'Product ID and quantity are required');
-      return;
+    // Construct variantSku from size and unit if not provided
+    let finalVariantSku = variantSku;
+    if (!finalVariantSku && size !== undefined && unit) {
+      finalVariantSku = `${size}_${unit}`;
     }
 
-    if (size === undefined || unit === undefined) {
-      responseUtils.badRequestResponse(res, 'Size and unit are required');
+    if (!storeId || !productId || !finalVariantSku || quantity === undefined) {
+      responseUtils.badRequestResponse(res, 'Store ID, product ID, variant SKU (or size and unit), and quantity are required');
       return;
     }
 
@@ -231,52 +324,125 @@ export const updateItem = async (req: Request, res: Response): Promise<void> => 
       return;
     }
 
-    // Get user's cart (without population for update operations)
-    const userObjectId = new (require('mongoose').Types.ObjectId)(userId);
-    let cart = await Cart.findOne({ user: userObjectId });
+    // Get user's cart
+    const cart = await Cart.findOne({ userId, storeId });
     if (!cart) {
       responseUtils.notFoundResponse(res, 'Cart not found');
       return;
     }
 
-    // Ensure types are correct
-    const sizeNum = typeof size === 'string' ? parseFloat(size) : Number(size);
-    const quantityNum = typeof quantity === 'string' ? parseInt(quantity, 10) : Number(quantity);
-
-    getLogger().info(
-      `Updating cart item for user ${userId}: productId=${productId}, size=${sizeNum} (type: ${typeof sizeNum}), unit=${unit}, quantity=${quantityNum}`
+    // Find item
+    const itemIndex = cart.items.findIndex(
+      (item) => item.productId.toString() === productId && item.variantSku === finalVariantSku
     );
 
-    // Update variant quantity (will remove if quantity is 0)
-    await cart.updateItem(productId, sizeNum, unit, quantityNum);
+    if (itemIndex === -1) {
+      responseUtils.notFoundResponse(res, 'Item not found in cart');
+      return;
+    }
 
-    // Refresh cart to get updated totals and populate product details
-    await cart.populate('items.product');
+    if (quantity === 0) {
+      // Remove item
+      cart.items.splice(itemIndex, 1);
+    } else {
+      // Verify stock availability
+      const storeProduct = await StoreProduct.findOne({
+        storeId,
+        productId,
+      });
+
+      if (!storeProduct) {
+        responseUtils.badRequestResponse(res, 'Product is not available at this store');
+        return;
+      }
+
+      // Find the variant in the store product
+      const variant = storeProduct.variants.find((v) => v.sku === finalVariantSku);
+      if (!variant || !variant.isAvailable) {
+        responseUtils.badRequestResponse(res, 'Product variant is not available at this store');
+        return;
+      }
+
+      // Check stock from InventoryBatches (stock is not stored in StoreProduct)
+      // First, check if product uses shared stock
+      const allProductBatches = await InventoryBatch.find({
+        storeId,
+        productId,
+        status: 'active',
+      });
+
+      // Check if any batch uses shared stock
+      const hasSharedStock = allProductBatches.some((batch: any) => batch.usesSharedStock === true);
+
+      let batches: any[];
+      if (hasSharedStock) {
+        // Shared stock: Get all active shared stock batches (ignore variantSku)
+        batches = allProductBatches.filter((batch: any) => {
+          const isExpired = batch.expiryDate && new Date() > batch.expiryDate;
+          return batch.usesSharedStock === true && !isExpired;
+        });
+      } else {
+        // Variant-specific stock: Get batches matching the variant SKU
+        batches = allProductBatches.filter((batch: any) => {
+          const isExpired = batch.expiryDate && new Date() > batch.expiryDate;
+          return batch.variantSku === finalVariantSku && !isExpired;
+        });
+      }
+
+      const totalStock = batches.reduce((sum: number, batch: any) => {
+        return sum + (batch.availableQuantity || 0);
+      }, 0);
+
+      if (totalStock < quantity) {
+        responseUtils.badRequestResponse(res, `Insufficient stock. Available: ${totalStock}`);
+        return;
+      }
+
+      // Update quantity
+      cart.items[itemIndex].quantity = quantity;
+    }
+
+    await cart.save();
+
+    // Populate and enrich
+    await cart.populate('items.productId');
+    await cart.populate('storeId');
+
+    const enrichedItems = await Promise.all(
+      cart.items.map(async (item: any) => {
+        const sp = await StoreProduct.findOne({
+          storeId,
+          productId: item.productId,
+          variantSku: item.variantSku,
+        }).populate('productId', 'name images');
+
+        return {
+          productId: item.productId,
+          variantSku: item.variantSku,
+          quantity: item.quantity,
+          product: item.productId,
+          storeProduct: sp || null,
+        };
+      })
+    );
 
     getLogger().info(
-      `Cart item updated for user ${userId}: ${productId}, variant: ${sizeNum}${unit}, quantity: ${quantityNum}`
+      `Cart item updated for user ${userId}: ${productId}, variant: ${finalVariantSku}, quantity: ${quantity}`
     );
 
     responseUtils.successResponse(res, 'Cart item updated successfully', {
       cart: {
         _id: cart._id,
-        items: cart.items.map((item: any) => ({
-          product: item.product,
-          variants: item.variants,
-          addedAt: item.addedAt,
-        })),
-        totalItems: cart.totalItems,
-        totalPrice: cart.totalPrice,
-        lastActivity: cart.lastActivity,
+        userId: cart.userId,
+        storeId: cart.storeId,
+        items: enrichedItems,
+        createdAt: cart.createdAt,
+        updatedAt: cart.updatedAt,
       },
     });
   } catch (error: any) {
     getLogger().error('Update cart item error:', error);
-    if (error.message && error.message.includes('Variant not found')) {
-      responseUtils.badRequestResponse(res, error.message);
-    } else {
-      responseUtils.internalServerErrorResponse(res, 'Failed to update cart item');
-    }
+    responseUtils.internalServerErrorResponse(res, 'Failed to update cart item');
   }
 };
 
@@ -284,50 +450,72 @@ export const updateItem = async (req: Request, res: Response): Promise<void> => 
 export const removeItem = async (req: Request, res: Response): Promise<void> => {
   try {
     const userId = (req as any).user?.userId;
-    const { productId, size, unit } = req.body;
+    const { storeId, productId, variantSku } = req.body;
 
     if (!userId) {
       responseUtils.unauthorizedResponse(res, 'User not authenticated');
       return;
     }
 
-    if (!productId) {
-      responseUtils.badRequestResponse(res, 'Product ID is required');
+    if (!storeId || !productId || !variantSku) {
+      responseUtils.badRequestResponse(res, 'Store ID, product ID, and variant SKU are required');
       return;
     }
 
     // Get user's cart
-    const cart = await Cart.findUserCart(userId);
+    const cart = await Cart.findOne({ userId, storeId });
     if (!cart) {
       responseUtils.notFoundResponse(res, 'Cart not found');
       return;
     }
 
-    // If variant info provided, remove specific variant; otherwise remove entire product
-    if (size !== undefined && unit !== undefined) {
-      await cart.removeVariant(productId, size, unit);
-      getLogger().info(
-        `Variant removed from cart for user ${userId}: ${productId}, variant: ${size}${unit}`
-      );
-    } else {
-      await cart.removeItem(productId);
-      getLogger().info(`Item removed from cart for user ${userId}: ${productId}`);
+    // Find and remove item
+    const itemIndex = cart.items.findIndex(
+      (item) => item.productId.toString() === productId && item.variantSku === variantSku
+    );
+
+    if (itemIndex === -1) {
+      responseUtils.notFoundResponse(res, 'Item not found in cart');
+      return;
     }
 
-    // Refresh cart to get updated totals
-    await cart.populate('items.product');
+    cart.items.splice(itemIndex, 1);
+    await cart.save();
+
+    // Populate and enrich
+    await cart.populate('items.productId');
+    await cart.populate('storeId');
+
+    const enrichedItems = await Promise.all(
+      cart.items.map(async (item: any) => {
+        const sp = await StoreProduct.findOne({
+          storeId,
+          productId: item.productId,
+          variantSku: item.variantSku,
+        }).populate('productId', 'name images');
+
+        return {
+          productId: item.productId,
+          variantSku: item.variantSku,
+          quantity: item.quantity,
+          product: item.productId,
+          storeProduct: sp || null,
+        };
+      })
+    );
+
+    getLogger().info(
+      `Item removed from cart for user ${userId}: ${productId}, variant: ${variantSku}`
+    );
 
     responseUtils.successResponse(res, 'Item removed from cart successfully', {
       cart: {
         _id: cart._id,
-        items: cart.items.map((item: any) => ({
-          product: item.product,
-          variants: item.variants,
-          addedAt: item.addedAt,
-        })),
-        totalItems: cart.totalItems,
-        totalPrice: cart.totalPrice,
-        lastActivity: cart.lastActivity,
+        userId: cart.userId,
+        storeId: cart.storeId,
+        items: enrichedItems,
+        createdAt: cart.createdAt,
+        updatedAt: cart.updatedAt,
       },
     });
   } catch (error) {
@@ -340,31 +528,39 @@ export const removeItem = async (req: Request, res: Response): Promise<void> => 
 export const clearCart = async (req: Request, res: Response): Promise<void> => {
   try {
     const userId = (req as any).user?.userId;
+    const storeId = req.query.storeId as string;
 
     if (!userId) {
       responseUtils.unauthorizedResponse(res, 'User not authenticated');
       return;
     }
 
+    if (!storeId) {
+      responseUtils.badRequestResponse(res, 'Store ID is required');
+      return;
+    }
+
     // Get user's cart
-    const cart = await Cart.findUserCart(userId);
+    const cart = await Cart.findOne({ userId, storeId });
     if (!cart) {
       responseUtils.notFoundResponse(res, 'Cart not found');
       return;
     }
 
     // Clear cart
-    await cart.clearCart();
+    cart.items = [];
+    await cart.save();
 
-    getLogger().info(`Cart cleared for user ${userId}`);
+    getLogger().info(`Cart cleared for user ${userId}, store ${storeId}`);
 
     responseUtils.successResponse(res, 'Cart cleared successfully', {
       cart: {
         _id: cart._id,
+        userId: cart.userId,
+        storeId: cart.storeId,
         items: [],
-        totalItems: 0,
-        totalPrice: 0,
-        lastActivity: cart.lastActivity,
+        createdAt: cart.createdAt,
+        updatedAt: cart.updatedAt,
       },
     });
   } catch (error) {

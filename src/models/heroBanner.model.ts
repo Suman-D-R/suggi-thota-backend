@@ -9,6 +9,7 @@ export interface IHeroBanner extends Document {
   icon?: string;
   image?: string; // Optional image URL (alternative to icon)
   link?: string; // Optional link to navigate to
+  storeId?: mongoose.Types.ObjectId; // Optional store ID for store-specific banners
   isActive: boolean;
   sortOrder: number;
   createdAt: Date;
@@ -56,6 +57,11 @@ const heroBannerSchema = new Schema<IHeroBanner>(
       type: Number,
       default: 0,
     },
+    storeId: {
+      type: Schema.Types.ObjectId,
+      ref: 'Store',
+      index: true,
+    },
   },
   {
     timestamps: true,
@@ -67,6 +73,7 @@ const heroBannerSchema = new Schema<IHeroBanner>(
 // Indexes
 heroBannerSchema.index({ isActive: 1, sortOrder: 1 });
 heroBannerSchema.index({ createdAt: -1 });
+heroBannerSchema.index({ storeId: 1, isActive: 1, sortOrder: 1 });
 
 // Static methods
 heroBannerSchema.statics.findActive = function () {

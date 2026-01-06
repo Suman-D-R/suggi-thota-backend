@@ -1,6 +1,8 @@
-// Product enrichment utilities - Combine Product with ProductBatch data
+// Product enrichment utilities - Combine Product with StoreProduct and InventoryBatch data
+// NOTE: This file needs to be updated to use StoreProduct and InventoryBatch instead of ProductBatch
 import { Product } from '../models/product.model';
-import { ProductBatch } from '../models/productBatch.model';
+import { StoreProduct } from '../models/storeProduct.model';
+import { InventoryBatch } from '../models/inventoryBatch.model';
 import mongoose from 'mongoose';
 
 export interface EnrichedProduct {
@@ -118,12 +120,15 @@ export async function enrichProduct(product: any): Promise<EnrichedProduct> {
     ? product._id 
     : new mongoose.Types.ObjectId(product._id);
   
-  // Fetch all batches for this product
-  const batches = await ProductBatch.find({
-    product: productId,
-  })
-    .sort({ createdAt: -1 })
-    .lean();
+  // NOTE: This function needs to be updated to use StoreProduct and InventoryBatch
+  // For now, returning product without enrichment to prevent crashes
+  // TODO: Update to use store-specific pricing and inventory
+  const batches: any[] = [];
+  // const batches = await InventoryBatch.find({
+  //   productId: productId,
+  // })
+  //   .sort({ createdAt: -1 })
+  //   .lean();
   
   // Filter batches that have sellingVariants (we'll use all batches to get prices, even if stock is 0)
   const batchesWithVariants = batches.filter((batch) => {
@@ -246,12 +251,15 @@ export async function enrichProducts(products: any[]): Promise<EnrichedProduct[]
     p._id instanceof mongoose.Types.ObjectId ? p._id : new mongoose.Types.ObjectId(p._id)
   );
 
-  // Fetch all batches for these products in one query
-  const batches = await ProductBatch.find({
-    product: { $in: productIds },
-  })
-    .sort({ createdAt: -1 })
-    .lean();
+  // NOTE: This function needs to be updated to use StoreProduct and InventoryBatch
+  // For now, returning products without enrichment to prevent crashes
+  // TODO: Update to use store-specific pricing and inventory
+  const batches: any[] = [];
+  // const batches = await InventoryBatch.find({
+  //   productId: { $in: productIds },
+  // })
+  //   .sort({ createdAt: -1 })
+  //   .lean();
 
   // Group batches by product (include all batches with sellingVariants)
   const batchesByProduct = batches.reduce((acc: any, batch: any) => {

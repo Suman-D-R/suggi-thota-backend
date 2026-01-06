@@ -144,8 +144,66 @@ export const uploadProductImages = uploadMultiple('images', 5, 'products');
 // Category image upload
 export const uploadCategoryImage = uploadSingle('image', 'categories');
 
-// Hero banner image upload
-export const uploadHeroBannerImage = uploadSingle('image', 'hero-banners');
+// Hero banner image upload (store-specific)
+export const uploadHeroBannerImage = (req: Request, res: Response, next: NextFunction) => {
+  // Create a custom storage that can access storeId from req.body
+  // Note: multer processes form fields before files, so req.body should be available
+  const customS3Storage = multerS3({
+    s3: s3,
+    bucket: s3Config.bucketName,
+    metadata: (req, file, cb) => {
+      cb(null, { fieldName: file.fieldname });
+    },
+    key: (req: any, file, cb) => {
+      // Get storeId from body (multer parses form fields before processing files)
+      const storeId = (req.body?.storeId || req.query?.storeId) as string | undefined;
+      const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1E9);
+      const extension = path.extname(file.originalname);
+      const basename = path.basename(file.originalname, extension);
+      const filename = `${basename}-${uniqueSuffix}${extension}`;
+      
+      // Build folder path - include storeId if provided
+      const folder = storeId ? `hero-banners/store-${storeId}` : 'hero-banners';
+      cb(null, `${folder}/${filename}`);
+    },
+    contentType: multerS3.AUTO_CONTENT_TYPE,
+  });
+
+  const customLocalStorage = multer.diskStorage({
+    destination: (req, file, cb) => {
+      cb(null, 'uploads/');
+    },
+    filename: (req: any, file, cb) => {
+      const storeId = (req.body?.storeId || req.query?.storeId) as string | undefined;
+      const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1E9);
+      const extension = path.extname(file.originalname);
+      const basename = path.basename(file.originalname, extension);
+      const folder = storeId ? `hero-banners/store-${storeId}` : 'hero-banners';
+      cb(null, `${folder}-${basename}-${uniqueSuffix}${extension}`);
+    },
+  });
+
+  // Choose storage based on environment
+  const customStorage = envConfig.AWS_ACCESS_KEY_ID ? customS3Storage : customLocalStorage;
+  
+  const uploadSingle = multer({
+    storage: customStorage,
+    limits: { fileSize: envConfig.MAX_FILE_SIZE, files: 1 },
+    fileFilter,
+  }).single('image');
+
+  uploadSingle(req, res, (err) => {
+    if (err) {
+      getLogger().error('Hero banner image upload error:', err);
+      return res.status(400).json({
+        success: false,
+        message: err.message || 'File upload failed',
+        error: err.code || 'UPLOAD_ERROR',
+      });
+    }
+    next();
+  });
+};
 
 // Document upload
 export const uploadDocument = uploadSingle('document', 'documents');

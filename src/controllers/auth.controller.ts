@@ -21,6 +21,10 @@ import { otpService } from '../services/otp.service';
 import { smsService } from '../services/sms.service';
 import { firebaseOTPService } from '../services/firebase-otp.service';
 import { envConfig } from '../config/env';
+import { Cart } from '../models/cart.model';
+import { Store } from '../models/store.model';
+import { Product } from '../models/product.model';
+import { StoreProduct } from '../models/storeProduct.model';
 
 // Verify Firebase ID token and login/register (for Google login)
 export const verifyFirebaseToken = async (req: Request, res: Response): Promise<void> => {
@@ -256,7 +260,7 @@ export const sendOTP = async (req: Request, res: Response): Promise<void> => {
 // Verify OTP - Backend verifies OTP code and authenticates user
 export const verifyOTP = async (req: Request, res: Response): Promise<void> => {
   try {
-    const { phoneNumber, otp, email, name } = req.body;
+    const { phoneNumber, otp, email, name, cartData } = req.body;
 
     getLogger().info(`Verify OTP request received for ${phoneNumber}, OTP length: ${otp?.length}`);
 
@@ -388,6 +392,108 @@ export const verifyOTP = async (req: Request, res: Response): Promise<void> => {
 
     // Delete OTP after successful verification
     otpService.deleteOTP(phoneNumber);
+
+    // Save cart data if provided
+    getLogger().info(`Cart data received: ${cartData ? `storeId=${cartData.storeId}, itemsCount=${cartData.items?.length || 0}` : 'none'}`);
+    
+    if (cartData && cartData.storeId && cartData.items && Array.isArray(cartData.items) && cartData.items.length > 0) {
+      getLogger().info(`Saving cart data for user after login: storeId=${cartData.storeId}, itemsCount=${cartData.items.length}`);
+      try {
+        const { storeId, items } = cartData;
+        getLogger().info(`Cart items to save: ${JSON.stringify(items.map((i: any) => ({ productId: i.productId, size: i.size, unit: i.unit, quantity: i.quantity })))}`);
+
+        // Verify store exists
+        const store = await Store.findById(storeId);
+        if (store && store.isActive) {
+          // Get or create cart
+          let cart = await Cart.findOne({ userId: user._id, storeId });
+
+          if (!cart) {
+            cart = new Cart({ userId: user._id, storeId, items: [] });
+          }
+
+          // Process each cart item
+          for (const item of items) {
+            const { productId, size, unit, quantity, sku } = item;
+
+            if (!productId || !size || !unit || !quantity || quantity <= 0) {
+              getLogger().warn(`Invalid cart item skipped: ${JSON.stringify(item)}`);
+              continue;
+            }
+
+            // Use SKU from request if provided, otherwise construct from size and unit
+            const variantSku = sku || `${size}_${unit}`;
+
+            // Verify product exists
+            const product = await Product.findById(productId);
+            if (!product) {
+              getLogger().warn(`Product not found: ${productId}`);
+              continue;
+            }
+
+            // Verify store product exists
+            const storeProduct = await StoreProduct.findOne({
+              storeId,
+              productId,
+              isActive: true,
+            });
+
+            if (!storeProduct) {
+              getLogger().warn(`Product not available at store: ${productId}, store: ${storeId}`);
+              continue;
+            }
+
+            // Find the variant in the store product
+            const variant = storeProduct.variants.find((v) => v.sku === variantSku);
+            if (!variant || !variant.isAvailable) {
+              getLogger().warn(`Variant not available: ${variantSku} for product: ${productId}`);
+              continue;
+            }
+
+            // Check if item already exists in cart
+            const existingItemIndex = cart.items.findIndex(
+              (cartItem) => cartItem.productId.toString() === productId && cartItem.variantSku === variantSku
+            );
+
+            if (existingItemIndex > -1) {
+              // Update quantity (merge with existing)
+              cart.items[existingItemIndex].quantity += quantity;
+            } else {
+              // Add new item
+              cart.items.push({
+                productId: new (require('mongoose').Types.ObjectId)(productId),
+                variantSku,
+                quantity,
+              });
+            }
+          }
+
+          await cart.save();
+          getLogger().info(`Cart saved successfully for user ${user._id} after login with ${cart.items.length} items. Cart ID: ${cart._id}`);
+          
+          // Log final cart state for debugging
+          const finalCartItems = cart.items.map(item => ({
+            productId: item.productId.toString(),
+            variantSku: item.variantSku,
+            quantity: item.quantity
+          }));
+          getLogger().info(`Final cart items: ${JSON.stringify(finalCartItems)}`);
+        } else {
+          getLogger().warn(`Store not found or inactive: ${storeId}, skipping cart save`);
+        }
+      } catch (cartError) {
+        // Don't fail login if cart save fails
+        getLogger().error('Failed to save cart after login:', cartError);
+        getLogger().error('Cart error details:', {
+          message: cartError instanceof Error ? cartError.message : String(cartError),
+          stack: cartError instanceof Error ? cartError.stack : undefined
+        });
+      }
+    } else {
+      if (cartData) {
+        getLogger().warn(`Cart data provided but invalid: storeId=${cartData.storeId}, items=${cartData.items?.length || 0}, isArray=${Array.isArray(cartData.items)}`);
+      }
+    }
 
     // Generate tokens
     const tokens = jwtUtils.generateTokens({

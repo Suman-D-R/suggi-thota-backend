@@ -20,6 +20,14 @@ router.get(
   heroBannerController.getActiveHeroBanners as any
 );
 
+// Get banners by store ID
+router.get(
+  '/store/:storeId',
+  validators.objectIdValidation('storeId'),
+  validationMiddlewares.handleValidationErrors,
+  heroBannerController.getBannersByStore as any
+);
+
 router.get(
   '/:id',
   validators.objectIdValidation('id'),
@@ -28,6 +36,7 @@ router.get(
 );
 
 // Admin only routes
+// Create new hero banner
 router.post(
   '/',
   authenticate as any,
@@ -39,6 +48,7 @@ router.post(
   heroBannerController.createHeroBanner as any
 );
 
+// Update hero banner (change banner)
 router.put(
   '/:id',
   authenticate as any,

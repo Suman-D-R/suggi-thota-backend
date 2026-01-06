@@ -15,6 +15,7 @@ export interface IOrderItem {
   total: number;
   size?: number; // Variant size
   unit?: string; // Variant unit
+  variantSku?: string; // Variant SKU
   batchSplits?: IBatchSplit[]; // Batch allocation details for this item
 }
 
@@ -22,6 +23,7 @@ export interface IOrder extends Document {
   _id: mongoose.Types.ObjectId;
   orderNumber: string;
   user: mongoose.Types.ObjectId;
+  storeId: mongoose.Types.ObjectId;
   items: IOrderItem[];
   deliveryAddress: mongoose.Types.ObjectId;
 
@@ -79,7 +81,7 @@ const batchSplitSchema = new Schema<IBatchSplit>(
   {
     batch: {
       type: Schema.Types.ObjectId,
-      ref: 'ProductBatch',
+      ref: 'InventoryBatch',
       required: true,
     },
     quantity: {
@@ -149,6 +151,11 @@ const orderSchema = new Schema<IOrder>(
     user: {
       type: Schema.Types.ObjectId,
       ref: 'User',
+      required: true,
+    },
+    storeId: {
+      type: Schema.Types.ObjectId,
+      ref: 'Store',
       required: true,
     },
     items: [orderItemSchema],

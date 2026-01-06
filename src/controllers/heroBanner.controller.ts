@@ -31,10 +31,21 @@ const extractS3KeyFromUrl = (imageUrl: string): string | null => {
 export const getAllHeroBanners = async (req: AuthenticatedRequest, res: Response): Promise<void> => {
   try {
     const includeInactive = req.query.includeInactive === 'true' && req.user?.role === 'admin';
+    const storeId = req.query.storeId as string | undefined;
     
     const filter: any = {};
     if (!includeInactive) {
       filter.isActive = true;
+    }
+    
+    // Filter by storeId if provided
+    if (storeId) {
+      if (mongoose.Types.ObjectId.isValid(storeId)) {
+        filter.storeId = new mongoose.Types.ObjectId(storeId);
+      } else {
+        responseUtils.badRequestResponse(res, 'Invalid store ID');
+        return;
+      }
     }
 
     const banners = await HeroBanner.find(filter)
@@ -51,7 +62,21 @@ export const getAllHeroBanners = async (req: AuthenticatedRequest, res: Response
 // Get active hero banners (public endpoint)
 export const getActiveHeroBanners = async (req: AuthenticatedRequest, res: Response): Promise<void> => {
   try {
-    const banners = await HeroBanner.find({ isActive: true })
+    const storeId = req.query.storeId as string | undefined;
+    
+    const filter: any = { isActive: true };
+    
+    // Filter by storeId if provided
+    if (storeId) {
+      if (mongoose.Types.ObjectId.isValid(storeId)) {
+        filter.storeId = new mongoose.Types.ObjectId(storeId);
+      } else {
+        responseUtils.badRequestResponse(res, 'Invalid store ID');
+        return;
+      }
+    }
+    
+    const banners = await HeroBanner.find(filter)
       .sort({ sortOrder: 1, createdAt: -1 })
       .lean();
 
@@ -97,6 +122,7 @@ export const createHeroBanner = async (req: AuthenticatedRequest, res: Response)
       link,
       isActive,
       sortOrder,
+      storeId,
     } = req.body;
 
     // Get uploaded image URL from multer (if any)
@@ -127,6 +153,16 @@ export const createHeroBanner = async (req: AuthenticatedRequest, res: Response)
       responseUtils.badRequestResponse(res, 'Either icon or image must be provided');
       return;
     }
+    
+    // Validate storeId if provided
+    let storeObjectId: mongoose.Types.ObjectId | undefined;
+    if (storeId) {
+      if (!mongoose.Types.ObjectId.isValid(storeId)) {
+        responseUtils.badRequestResponse(res, 'Invalid store ID');
+        return;
+      }
+      storeObjectId = new mongoose.Types.ObjectId(storeId);
+    }
 
     // Create hero banner
     const banner = new HeroBanner({
@@ -136,6 +172,7 @@ export const createHeroBanner = async (req: AuthenticatedRequest, res: Response)
       icon,
       image,
       link,
+      storeId: storeObjectId,
       isActive: isActive !== undefined ? isActive : true,
       sortOrder: sortOrder || 0,
     });
@@ -178,6 +215,7 @@ export const updateHeroBanner = async (req: AuthenticatedRequest, res: Response)
       link,
       isActive,
       sortOrder,
+      storeId,
     } = req.body;
 
     // Get uploaded image URL from multer (if any new file uploaded)
@@ -217,6 +255,19 @@ export const updateHeroBanner = async (req: AuthenticatedRequest, res: Response)
       }
     }
 
+    // Validate storeId if provided
+    if (storeId !== undefined) {
+      if (storeId === '' || storeId === null) {
+        banner.storeId = undefined;
+      } else {
+        if (!mongoose.Types.ObjectId.isValid(storeId)) {
+          responseUtils.badRequestResponse(res, 'Invalid store ID');
+          return;
+        }
+        banner.storeId = new mongoose.Types.ObjectId(storeId);
+      }
+    }
+    
     // Update fields
     if (title !== undefined) banner.title = title;
     if (subtitle !== undefined) banner.subtitle = subtitle;
@@ -280,6 +331,36 @@ export const deleteHeroBanner = async (req: AuthenticatedRequest, res: Response)
   }
 };
 
+// Get banners by store ID
+export const getBannersByStore = async (req: AuthenticatedRequest, res: Response): Promise<void> => {
+  try {
+    const { storeId } = req.params;
+    const includeInactive = req.query.includeInactive === 'true' && req.user?.role === 'admin';
+
+    if (!mongoose.Types.ObjectId.isValid(storeId)) {
+      responseUtils.badRequestResponse(res, 'Invalid store ID');
+      return;
+    }
+
+    const filter: any = {
+      storeId: new mongoose.Types.ObjectId(storeId),
+    };
+    
+    if (!includeInactive) {
+      filter.isActive = true;
+    }
+
+    const banners = await HeroBanner.find(filter)
+      .sort({ sortOrder: 1, createdAt: -1 })
+      .lean();
+
+    responseUtils.successResponse(res, 'Store banners retrieved successfully', { banners });
+  } catch (error) {
+    getLogger().error('Get banners by store error:', error);
+    responseUtils.internalServerErrorResponse(res, 'Failed to retrieve store banners');
+  }
+};
+
 // Hard delete hero banner (permanent)
 export const hardDeleteHeroBanner = async (req: AuthenticatedRequest, res: Response): Promise<void> => {
   try {
@@ -325,6 +406,7 @@ export const heroBannerController = {
   getAllHeroBanners,
   getActiveHeroBanners,
   getHeroBannerById,
+  getBannersByStore,
   createHeroBanner,
   updateHeroBanner,
   deleteHeroBanner,

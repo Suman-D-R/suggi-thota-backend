@@ -149,10 +149,10 @@ export const createAddress = async (req: Request, res: Response): Promise<void> 
     }
 
     // Validate required fields
-    if (!street || !city || !state || !pincode) {
+    if (!street || !city || !state) {
       responseUtils.badRequestResponse(
         res,
-        'Street, city, state, and pincode are required'
+        'Street, city, and state are required'
       );
       return;
     }
@@ -193,7 +193,7 @@ export const createAddress = async (req: Request, res: Response): Promise<void> 
       landmark: landmark?.trim(),
       city: city.trim(),
       state: state.trim(),
-      pincode: pincode.trim(),
+      pincode: pincode?.trim() || '',
       country: country?.trim() || 'India',
       contactName: contactName.trim(),
       contactPhone: contactPhone.trim(),

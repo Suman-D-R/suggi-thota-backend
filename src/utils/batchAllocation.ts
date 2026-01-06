@@ -1,6 +1,8 @@
 // Batch allocation utilities for FIFO inventory management
+// NOTE: This file is deprecated - batch allocation is now handled directly in order controller
+// using InventoryBatch model. Keeping for backward compatibility.
 import mongoose from 'mongoose';
-import { ProductBatch } from '../models/productBatch.model';
+import { InventoryBatch } from '../models/inventoryBatch.model';
 import { IBatchSplit } from '../models/order.model';
 
 /**
@@ -22,10 +24,13 @@ export async function allocateBatches(
     product: productId,
   };
 
-  // Find batches with available stock, sorted by creation date (FIFO)
-  const batches = await ProductBatch.find(filter)
-    .sort({ createdAt: 1 }) // Oldest first (FIFO)
-    .lean();
+  // NOTE: This function is deprecated - batch allocation is now handled in order controller
+  // For now, returning empty array to prevent crashes
+  // TODO: Remove this file or update to use InventoryBatch
+  const batches: any[] = [];
+  // const batches = await InventoryBatch.find(filter)
+  //   .sort({ createdAt: 1 }) // Oldest first (FIFO)
+  //   .lean();
 
   if (batches.length === 0) {
     throw new Error('No batches available for this product');
@@ -114,9 +119,11 @@ export async function reduceBatchStock(
   }));
 
   if (session) {
-    await ProductBatch.bulkWrite(operations, { session });
+    // NOTE: Deprecated - batch allocation now handled in order controller
+    // await InventoryBatch.bulkWrite(operations, { session });
   } else {
-    await ProductBatch.bulkWrite(operations);
+    // NOTE: Deprecated - batch allocation now handled in order controller
+    // await InventoryBatch.bulkWrite(operations);
   }
 }
 
@@ -139,9 +146,11 @@ export async function restoreBatchStock(
   }));
 
   if (session) {
-    await ProductBatch.bulkWrite(operations, { session });
+    // NOTE: Deprecated - batch allocation now handled in order controller
+    // await InventoryBatch.bulkWrite(operations, { session });
   } else {
-    await ProductBatch.bulkWrite(operations);
+    // NOTE: Deprecated - batch allocation now handled in order controller
+    // await InventoryBatch.bulkWrite(operations);
   }
 }
 

@@ -59,6 +59,18 @@ router.post(
     .trim()
     .isLength({ min: 1, max: 100 })
     .withMessage('Name must be between 1 and 100 characters'),
+  body('cartData')
+    .optional()
+    .isObject()
+    .withMessage('Cart data must be an object'),
+  body('cartData.storeId')
+    .optional()
+    .notEmpty()
+    .withMessage('Store ID is required if cart data is provided'),
+  body('cartData.items')
+    .optional()
+    .isArray()
+    .withMessage('Cart items must be an array'),
   validationMiddlewares.handleValidationErrors,
   authController.verifyOTP
 );

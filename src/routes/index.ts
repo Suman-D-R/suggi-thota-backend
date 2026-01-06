@@ -9,7 +9,9 @@ import orderRoutes from './order.routes';
 import addressRoutes from './address.routes';
 import deliveryRoutes from './delivery.routes';
 import heroBannerRoutes from './heroBanner.routes';
-import productBatchRoutes from './productBatch.routes';
+import storeRoutes from './store.routes';
+import storeProductRoutes from './storeProduct.routes';
+import inventoryBatchRoutes from './inventoryBatch.routes';
 
 /**
  * Register all API routes with the Express app
@@ -36,7 +38,9 @@ export const registerRoutes = (app: Express): void => {
   app.use('/api/addresses', addressRoutes);
   app.use('/api/deliveries', deliveryRoutes);
   app.use('/api/hero-banners', heroBannerRoutes);
-  app.use('/api/product-batches', productBatchRoutes);
+  app.use('/api/stores', storeRoutes);
+  app.use('/api/store-products', storeProductRoutes);
+  app.use('/api/inventory-batches', inventoryBatchRoutes);
 };
 
 // Export individual routes for direct access if needed
@@ -50,7 +54,9 @@ export {
   addressRoutes,
   deliveryRoutes,
   heroBannerRoutes,
-  productBatchRoutes,
+  storeRoutes,
+  storeProductRoutes,
+  inventoryBatchRoutes,
 };
 
 export default registerRoutes;
