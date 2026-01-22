@@ -9,6 +9,7 @@ export interface IStoreProductVariant {
   sellingPrice: number;
   discount: number;
   isAvailable: boolean;
+  maximumOrderLimit?: number;
 }
 
 export interface IStoreProduct extends Document {
@@ -48,6 +49,7 @@ const storeProductSchema = new Schema<IStoreProduct>(
           set: (value: number) => Math.round((value || 0) * 100) / 100, // Round to 2 decimal places
         },
         isAvailable: { type: Boolean, default: true },
+        maximumOrderLimit: { type: Number, default: undefined },
       },
     ],
     isActive: { type: Boolean, default: true },

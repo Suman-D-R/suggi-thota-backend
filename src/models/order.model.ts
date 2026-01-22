@@ -58,6 +58,9 @@ export interface IOrder extends Document {
   refundedAt?: Date;
   refundAmount?: number;
 
+  // Idempotency
+  idempotencyKey?: string; // Unique key to prevent duplicate orders
+
   // Timestamps
   createdAt: Date;
   updatedAt: Date;
@@ -133,6 +136,9 @@ const orderItemSchema = new Schema<IOrderItem>(
     unit: {
       type: String,
       enum: ['kg', 'g', 'liter', 'ml', 'piece', 'pack', 'dozen'],
+    },
+    variantSku: {
+      type: String,
     },
     batchSplits: [batchSplitSchema],
   },
@@ -257,6 +263,13 @@ const orderSchema = new Schema<IOrder>(
       type: Number,
       min: 0,
     },
+    // Idempotency key to prevent duplicate orders
+    idempotencyKey: {
+      type: String,
+      unique: true,
+      sparse: true, // Allow null values but ensure uniqueness when present
+      index: true,
+    },
   },
   {
     timestamps: true,
@@ -272,6 +285,7 @@ orderSchema.index({ paymentStatus: 1 });
 orderSchema.index({ deliveryPartner: 1 });
 orderSchema.index({ createdAt: -1 });
 orderSchema.index({ 'items.product': 1 });
+orderSchema.index({ idempotencyKey: 1 }); // Index for idempotency lookups
 
 // Pre-save middleware
 orderSchema.pre('save', function (next) {

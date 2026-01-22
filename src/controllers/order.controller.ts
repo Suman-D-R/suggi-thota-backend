@@ -23,6 +23,11 @@ const getLogger = () => {
 
 /**
  * Check stock availability for a product variant at a store
+ * 
+ * ⚠️ IMPORTANT: This function is INFORMATIONAL ONLY, not authoritative.
+ * Stock can change between this check and actual deduction.
+ * Real stock validation happens via atomic findOneAndUpdate operations.
+ * Use this only for UX messaging, not for business logic decisions.
  */
 async function checkStockAvailability(
   storeId: string,
@@ -30,59 +35,138 @@ async function checkStockAvailability(
   variantSku: string,
   requiredQuantity: number
 ): Promise<{ available: number; sufficient: boolean }> {
-  // Check StoreProduct for availability
-  const storeProduct = await StoreProduct.findOne({
-    storeId,
-    productId,
-    isActive: true,
-  }).lean();
+  try {
+    // Convert productId to ObjectId if it's a string
+    const productIdObj = typeof productId === 'string' 
+      ? new mongoose.Types.ObjectId(productId) 
+      : productId;
+    const storeIdObj = typeof storeId === 'string'
+      ? new mongoose.Types.ObjectId(storeId)
+      : storeId;
 
-  if (!storeProduct) {
+    // Check StoreProduct for availability
+    const storeProduct = await StoreProduct.findOne({
+      storeId: storeIdObj,
+      productId: productIdObj,
+      isActive: true,
+    }).lean();
+
+    if (!storeProduct) {
+      getLogger().warn(
+        `checkStockAvailability: StoreProduct not found for storeId: ${storeId}, productId: ${productId}`
+      );
+      return { available: 0, sufficient: false };
+    }
+
+    // ⚠️ CRITICAL: variantSku MUST come from StoreProduct API response
+    // Never construct variantSku - always use the variantSku from the product API
+    const variant = storeProduct.variants.find((v) => v.sku === variantSku);
+    
+    if (!variant) {
+      getLogger().warn(
+        `checkStockAvailability: Variant not found for productId: ${productId}, variantSku: ${variantSku}. Available variants: ${storeProduct.variants.map((v: any) => v.sku).join(', ')}`
+      );
+      return { available: 0, sufficient: false };
+    }
+    
+    // Use the actual SKU from the matched variant (should be same as variantSku)
+    // Note: We don't check isAvailable here because it might be stale.
+    // We'll check actual stock from InventoryBatch instead.
+    const actualVariantSku = variant.sku;
+
+    // Get total stock from InventoryBatches (only active, non-expired batches)
+    // First, check if product uses shared stock
+    const allProductBatches = await InventoryBatch.find({
+      storeId: storeIdObj,
+      productId: productIdObj,
+      status: 'active',
+    })
+      .sort({ createdAt: 1 }) // FIFO order
+      .lean();
+
+    getLogger().info(
+      `checkStockAvailability: Found ${allProductBatches.length} active batches for productId: ${productId}, storeId: ${storeId}`
+    );
+
+    // Check if any batch uses shared stock
+    const hasSharedStock = allProductBatches.some((batch: any) => batch.usesSharedStock === true);
+
+    let batches: any[];
+    if (hasSharedStock) {
+      // Shared stock: Get all active shared stock batches (ignore variantSku)
+      batches = allProductBatches.filter((batch: any) => {
+        const isExpired = batch.expiryDate && new Date() > batch.expiryDate;
+        return batch.usesSharedStock === true && !isExpired;
+      });
+      getLogger().info(
+        `checkStockAvailability: Using shared stock. Found ${batches.length} shared stock batches. Total available: ${batches.reduce((sum, b) => sum + (b.availableQuantity || 0), 0)}`
+      );
+    } else {
+      // Variant-specific stock: Get batches matching the variant SKU
+      // Use the actual SKU from the matched variant (may have been corrected from size+unit matching)
+      batches = allProductBatches.filter((batch: any) => {
+        const isExpired = batch.expiryDate && new Date() > batch.expiryDate;
+        const matches = batch.variantSku === actualVariantSku && !isExpired;
+        if (!matches && !isExpired) {
+          getLogger().debug(
+            `checkStockAvailability: Batch variantSku mismatch. Batch: ${batch.variantSku}, Required: ${actualVariantSku}`
+          );
+        }
+        return matches;
+      });
+      getLogger().info(
+        `checkStockAvailability: Using variant-specific stock. Found ${batches.length} batches for variantSku: ${actualVariantSku}. Total available: ${batches.reduce((sum, b) => sum + (b.availableQuantity || 0), 0)}`
+      );
+    }
+
+    const totalAvailable = batches.reduce((sum, batch) => {
+      return sum + (batch.availableQuantity || 0);
+    }, 0);
+
+    getLogger().info(
+      `checkStockAvailability: Final result for productId: ${productId}, variantSku: ${variantSku}, required: ${requiredQuantity}, available: ${totalAvailable}, sufficient: ${totalAvailable >= requiredQuantity}`
+    );
+
+    return {
+      available: totalAvailable,
+      sufficient: totalAvailable >= requiredQuantity,
+    };
+  } catch (error: any) {
+    getLogger().error(
+      `checkStockAvailability error for productId: ${productId}, variantSku: ${variantSku}:`,
+      error
+    );
     return { available: 0, sufficient: false };
   }
+}
 
-  // Check if variant exists and is available
-  const variant = storeProduct.variants.find((v) => v.sku === variantSku);
-  if (!variant || !variant.isAvailable) {
-    return { available: 0, sufficient: false };
-  }
-
-  // Get total stock from InventoryBatches (only active, non-expired batches)
-  // First, check if product uses shared stock
-  const allProductBatches = await InventoryBatch.find({
-    storeId,
-    productId,
-    status: 'active',
-  })
-    .sort({ createdAt: 1 }) // FIFO order
-    .lean();
-
-  // Check if any batch uses shared stock
-  const hasSharedStock = allProductBatches.some((batch: any) => batch.usesSharedStock === true);
-
-  let batches: any[];
-  if (hasSharedStock) {
-    // Shared stock: Get all active shared stock batches (ignore variantSku)
-    batches = allProductBatches.filter((batch: any) => {
-      const isExpired = batch.expiryDate && new Date() > batch.expiryDate;
-      return batch.usesSharedStock === true && !isExpired;
-    });
-  } else {
-    // Variant-specific stock: Get batches matching the variant SKU
-    batches = allProductBatches.filter((batch: any) => {
-      const isExpired = batch.expiryDate && new Date() > batch.expiryDate;
-      return batch.variantSku === variantSku && !isExpired;
-    });
-  }
-
-  const totalAvailable = batches.reduce((sum, batch) => {
-    return sum + (batch.availableQuantity || 0);
-  }, 0);
-
-  return {
-    available: totalAvailable,
-    sufficient: totalAvailable >= requiredQuantity,
-  };
+/**
+ * 🔒 ATOMIC STOCK DEDUCTION HELPER
+ * 
+ * This is a wrapper around InventoryBatch.deductStock() for convenience.
+ * The actual atomic deduction logic is in the InventoryBatch model static method.
+ * 
+ * ⚠️ CRITICAL: Always use InventoryBatch.deductStock() for stock deductions.
+ * Cart, StoreProduct, and UI checks are advisory only.
+ * 
+ * @deprecated Use InventoryBatch.deductStock() directly instead
+ * @param batchId - The inventory batch ID
+ * @param quantity - Quantity to deduct
+ * @param session - Optional MongoDB session for transactions
+ * @returns Updated batch
+ * @throws Error with message starting with 'INSUFFICIENT_STOCK' if deduction fails
+ */
+async function deductStockSafely({
+  batchId,
+  quantity,
+  session,
+}: {
+  batchId: mongoose.Types.ObjectId;
+  quantity: number;
+  session?: mongoose.ClientSession | null;
+}): Promise<any> {
+  // Use the model's atomic static method
+  return await InventoryBatch.deductStock(batchId, quantity, session || null);
 }
 
 /**
@@ -122,6 +206,44 @@ export const createOrder = async (req: Request, res: Response): Promise<void> =>
 
   try {
     const userId = (req as any).user?.userId;
+
+    // IDEMPOTENCY CHECK - Prevent duplicate orders (CRITICAL FIX)
+    // Accept Idempotency-Key header (industry standard: RFC 7231)
+    const idempotencyKey = req.headers['idempotency-key'] as string || 
+                          req.headers['x-idempotency-key'] as string ||
+                          req.body.idempotencyKey;
+
+    if (idempotencyKey) {
+      // Check if order with this key already exists
+      const existingOrder = await Order.findOne({ idempotencyKey });
+      if (existingOrder) {
+        getLogger().info(`Idempotent request detected - returning existing order: ${existingOrder.orderNumber}`);
+        // Return existing order (don't create duplicate)
+        await existingOrder.populate('items.product');
+        await existingOrder.populate('deliveryAddress');
+        
+        responseUtils.successResponse(res, 'Order already exists (idempotent request)', {
+          order: {
+            _id: existingOrder._id,
+            orderNumber: existingOrder.orderNumber,
+            items: existingOrder.items,
+            deliveryAddress: existingOrder.deliveryAddress,
+            subtotal: existingOrder.subtotal,
+            deliveryFee: existingOrder.deliveryFee,
+            tax: existingOrder.tax,
+            discount: existingOrder.discount,
+            total: existingOrder.total,
+            paymentMethod: existingOrder.paymentMethod,
+            status: existingOrder.status,
+            paymentStatus: existingOrder.paymentStatus,
+            estimatedDeliveryTime: existingOrder.estimatedDeliveryTime,
+            createdAt: existingOrder.createdAt,
+          },
+        });
+        return;
+      }
+    }
+
     const {
       deliveryAddressId,
       paymentMethod,
@@ -292,7 +414,7 @@ export const createOrder = async (req: Request, res: Response): Promise<void> =>
       return;
     }
 
-    const cart = await withSession(
+    let cart = await withSession(
       Cart.findOne({ userId, storeId }).populate('items.productId')
     );
 
@@ -314,6 +436,49 @@ export const createOrder = async (req: Request, res: Response): Promise<void> =>
       }
       responseUtils.badRequestResponse(res, 'Cart is empty. Please add items to cart before placing order.');
       return;
+    }
+
+    // CRITICAL: Revalidate cart before order creation
+    // This ensures quantities are adjusted based on current stock
+    // Import revalidateCart function from cart controller
+    const { revalidateCart } = require('./cart.controller');
+    cart = await revalidateCart(cart);
+    
+    // Check if cart has issues after revalidation
+    if (cart.issues && cart.issues.length > 0) {
+      if (useTransaction && session) {
+        await session.abortTransaction();
+        session.endSession();
+      }
+      
+      // Return cart issues so frontend can display them
+      const issueMessages = cart.issues.map((issue: any) => {
+        const productName = issue.productId?.name || 'Product';
+        if (issue.reason === 'OUT_OF_STOCK') {
+          return `${productName} is out of stock`;
+        } else {
+          return `${productName} - Only ${issue.availableQuantity} available (requested ${issue.requestedQuantity})`;
+        }
+      });
+      
+      // Return conflict response (409) to indicate stock changed
+      responseUtils.conflictResponse(
+        res,
+        'Stock changed, please retry',
+        { 
+          stockErrors: issueMessages,
+          cartIssues: cart.issues,
+          message: 'Cart items have stock issues. Please review and update your cart.'
+        }
+      );
+      return;
+    }
+
+    // Update cart if it was modified during revalidation
+    if (useTransaction && session) {
+      await cart.save({ session });
+    } else {
+      await cart.save();
     }
 
     // Validate stock availability and prepare order items
@@ -342,7 +507,7 @@ export const createOrder = async (req: Request, res: Response): Promise<void> =>
         continue;
       }
       
-      const variantSku = cartItem.variantSku;
+      const cartVariantSku = cartItem.variantSku; // SKU from cart (may be constructed like "200_g")
       const quantity = cartItem.quantity;
 
       // Get StoreProduct for pricing and variant info
@@ -361,28 +526,74 @@ export const createOrder = async (req: Request, res: Response): Promise<void> =>
         continue;
       }
 
-      // Find the variant in the store product
-      const variant = storeProduct.variants.find((v: any) => v.sku === variantSku);
-      if (!variant || !variant.isAvailable) {
+      // ⚠️ CRITICAL: variantSku MUST come from StoreProduct API response
+      // Never construct variantSku - always use the variantSku from the product API
+      const variant = storeProduct.variants.find((v: any) => v.sku === cartVariantSku);
+      
+      if (!variant) {
         stockErrors.push(
-          `${product.name} (${variantSku}) is not available at this store`
+          `${product.name} - Variant with SKU "${cartVariantSku}" not found. Please use variantSku from the product API response.`
         );
         continue;
       }
+
+      if (!variant.isAvailable) {
+        stockErrors.push(
+          `${product.name} (${variant.sku}) is not available at this store`
+        );
+        continue;
+      }
+
+      // Use the actual SKU from the matched variant (should be same as cartVariantSku)
+      const actualVariantSku = variant.sku;
 
       const size = variant.size || 0;
       const unit = variant.unit || 'piece';
       const mrp = variant.mrp;
 
-      // Use variant selling price (with discount applied)
-      const price = variant.sellingPrice;
-      const finalPrice = price - (variant.discount || 0);
+      // PRICE VALIDATION - Compare current price with cart snapshot (CRITICAL FIX)
+      // Get price from cart snapshot if available
+      const cartItemPriceSnapshot = cartItem.priceSnapshot;
+      const currentSellingPrice = variant.sellingPrice || 0;
+      const currentDiscount = variant.discount || 0;
+      // Ensure final price is never negative (discount cannot exceed selling price)
+      const currentFinalPrice = Math.max(0, currentSellingPrice - currentDiscount);
+      
+      // Log warning if discount exceeds selling price (data integrity issue)
+      if (currentDiscount > currentSellingPrice) {
+        getLogger().warn(
+          `Discount (${currentDiscount}) exceeds selling price (${currentSellingPrice}) for product ${productId}, variant ${actualVariantSku}. Final price clamped to 0.`
+        );
+      }
 
-      // Check stock availability
+      // If cart has price snapshot, validate against current price
+      if (cartItemPriceSnapshot) {
+        const snapshotFinalPrice = cartItemPriceSnapshot.finalPrice || 0;
+        const priceDifference = Math.abs(currentFinalPrice - snapshotFinalPrice);
+        const priceTolerance = 0.01; // Allow 1 paisa difference for floating point
+
+        if (priceDifference > priceTolerance) {
+          // Price has changed - notify user
+          const priceChangeMessage = currentFinalPrice > snapshotFinalPrice
+            ? `Price increased from ₹${snapshotFinalPrice.toFixed(2)} to ₹${currentFinalPrice.toFixed(2)}`
+            : `Price decreased from ₹${snapshotFinalPrice.toFixed(2)} to ₹${currentFinalPrice.toFixed(2)}`;
+
+          stockErrors.push(
+            `${product.name} (${size} ${unit}) - ${priceChangeMessage}. Please update your cart.`
+          );
+          continue;
+        }
+      }
+
+      // Use current price (validated against snapshot)
+      const finalPrice = currentFinalPrice;
+
+      // Check stock availability (informational only - atomic deduction is authoritative)
+      // Use the actual variant SKU (may have been corrected from size+unit matching above)
       const stockCheck = await checkStockAvailability(
         storeId,
         productId,
-        variantSku,
+        actualVariantSku, // Use the actual SKU (may have been corrected from size+unit matching)
         quantity
       );
 
@@ -393,8 +604,13 @@ export const createOrder = async (req: Request, res: Response): Promise<void> =>
         continue;
       }
 
+      // NOTE: We don't do final stock check here because:
+      // 1. Cart was already revalidated at the start
+      // 2. Atomic deduction will handle race conditions
+      // 3. checkStockAvailability() is informational only, not authoritative
+
       // Allocate inventory batches (FIFO) - only active, non-expired batches
-      // First check if product uses shared stock
+      // OPTIMIZATION: Fetch all batches once per product, not per item
       const allProductBatches = await withSession(
         InventoryBatch.find({
           storeId,
@@ -415,22 +631,25 @@ export const createOrder = async (req: Request, res: Response): Promise<void> =>
         });
       } else {
         // Variant-specific stock: Get batches matching the variant SKU
+        // Use the actual SKU from the matched variant (may have been corrected from size+unit matching)
         batches = allProductBatches.filter((batch: any) => {
           const isExpired = batch.expiryDate && new Date() > batch.expiryDate;
-          return batch.variantSku === variantSku && !isExpired;
+          return batch.variantSku === variant.sku && !isExpired;
         });
       }
 
       let remainingQuantity = quantity;
       const batchSplits: any[] = [];
 
+      // Allocate from batches (no re-fetch needed - atomic deduction will handle conflicts)
       for (const batch of batches) {
         if (remainingQuantity <= 0) break;
 
-        // Skip expired batches
-        const isExpired = batch.expiryDate && new Date() > batch.expiryDate;
-        if (isExpired) continue;
+        // Skip if batch is expired (already filtered, but double-check)
+        if (batch.expiryDate && new Date() > batch.expiryDate) continue;
 
+        // Use available quantity from fetched batch
+        // Note: This may be stale, but atomic deduction will catch conflicts
         const availableFromBatch = Math.min(batch.availableQuantity, remainingQuantity);
         if (availableFromBatch > 0) {
           batchSplits.push({
@@ -445,7 +664,7 @@ export const createOrder = async (req: Request, res: Response): Promise<void> =>
 
       if (remainingQuantity > 0) {
         stockErrors.push(
-          `${product.name} (${size} ${unit}) - Insufficient stock in batches`
+          `${product.name} (${size} ${unit}) - Insufficient stock in batches. Required: ${quantity}, Allocated: ${quantity - remainingQuantity}`
         );
         continue;
       }
@@ -461,7 +680,7 @@ export const createOrder = async (req: Request, res: Response): Promise<void> =>
         total: itemTotal,
         size,
         unit,
-        variantSku,
+        variantSku: actualVariantSku, // Use the actual SKU (may have been corrected from size+unit matching)
         batchSplits,
       });
 
@@ -497,6 +716,49 @@ export const createOrder = async (req: Request, res: Response): Promise<void> =>
     const finalDiscount = discount || 0;
     const finalTotal = subtotal + deliveryFee + tax - finalDiscount;
 
+    // 🔒 CRITICAL: Deduct stock BEFORE creating order/transaction
+    // This ensures we don't create orders for items we can't fulfill
+    // If stock deduction fails, we abort before creating any records
+    // 
+    // ⚠️ AUTHORITATIVE STOCK DEDUCTION
+    // This is the ONLY place where stock is actually deducted.
+    // Cart, StoreProduct, and UI checks are advisory only.
+    // Uses InventoryBatch.deductStock() for atomic, concurrency-safe deduction.
+    try {
+      for (const split of allBatchSplits) {
+        await InventoryBatch.deductStock(
+          split.batch,
+          split.quantity,
+          useTransaction && session ? session : null
+        );
+      }
+    } catch (error: any) {
+      // Stock deduction failed - abort transaction and return error
+      if (useTransaction && session) {
+        await session.abortTransaction();
+        session.endSession();
+      }
+
+      getLogger().warn(`Stock deduction failed before order creation:`, error.message);
+      
+      // Check if it's an INSUFFICIENT_STOCK error
+      const isStockError = error.message && error.message.includes('INSUFFICIENT_STOCK');
+      
+      // Return conflict response (409) to indicate stock changed
+      responseUtils.conflictResponse(
+        res,
+        'Stock changed, please retry',
+        { 
+          stockError: error.message,
+          message: isStockError 
+            ? 'Some items may have been purchased by another customer or stock was manually updated. Please review your cart and try again.'
+            : error.message
+        }
+      );
+      return;
+    }
+
+    // Stock successfully deducted - now safe to create order
     // Generate order number
     const timestamp = Date.now().toString().slice(-6);
     const random = Math.random().toString(36).substring(2, 5).toUpperCase();
@@ -530,6 +792,7 @@ export const createOrder = async (req: Request, res: Response): Promise<void> =>
       orderNotes,
       status: 'pending',
       paymentStatus: paymentMethod === 'cod' ? 'pending' : 'pending',
+      idempotencyKey: idempotencyKey || undefined, // Store idempotency key if provided
     });
 
     // Save order
@@ -558,8 +821,18 @@ export const createOrder = async (req: Request, res: Response): Promise<void> =>
         // Update order payment status based on transaction status
         if (transactionStatus === 'completed') {
           order.paymentStatus = 'paid';
+          if (useTransaction && session) {
+            await order.save({ session });
+          } else {
+            await order.save();
+          }
         } else if (transactionStatus === 'failed') {
           order.paymentStatus = 'failed';
+          if (useTransaction && session) {
+            await order.save({ session });
+          } else {
+            await order.save();
+          }
         }
       } else {
         // Payment initiated but not yet confirmed (async payment flow)
@@ -588,16 +861,6 @@ export const createOrder = async (req: Request, res: Response): Promise<void> =>
       await transaction.save();
     }
 
-    // Reduce stock from inventory batches
-    for (const split of allBatchSplits) {
-      const updateOptions: any = { $inc: { availableQuantity: -split.quantity } };
-      if (useTransaction && session) {
-        await InventoryBatch.findByIdAndUpdate(split.batch, updateOptions, { session });
-      } else {
-        await InventoryBatch.findByIdAndUpdate(split.batch, updateOptions);
-      }
-    }
-
     // Update StoreProduct stock (if stock field exists)
     for (const item of orderItems) {
       const updateOptions: any = {};
@@ -605,12 +868,27 @@ export const createOrder = async (req: Request, res: Response): Promise<void> =>
       // This update is kept for backward compatibility if needed
     }
 
-    // Clear cart
-    cart.items = [];
-    if (useTransaction && session) {
-      await cart.save({ session });
+    // Clear cart only when:
+    // 1. COD payment (immediate)
+    // 2. Online payment that is confirmed (status = 'completed')
+    // Don't clear cart for pending online payments (payment may fail)
+    const shouldClearCart = 
+      paymentMethod === 'cod' || 
+      (paymentMethod !== 'cod' && transactionStatus === 'completed');
+    
+    if (shouldClearCart) {
+      cart.items = [];
+      cart.issues = [];
+      if (useTransaction && session) {
+        await cart.save({ session });
+      } else {
+        await cart.save();
+      }
     } else {
-      await cart.save();
+      // For pending online payments, keep cart but mark items as "in order"
+      // This allows user to see what's being processed
+      // Cart will be cleared when payment is confirmed via webhook/callback
+      getLogger().info(`Cart kept for pending payment - order ${order.orderNumber}`);
     }
 
     // Commit transaction if using one
@@ -1296,6 +1574,329 @@ export const collectPayment = async (req: Request, res: Response): Promise<void>
   }
 };
 
+/**
+ * Reorder items from a previous order
+ * Checks stock availability and adds available items to cart
+ * Removes existing items from cart before adding new ones
+ */
+export const reorder = async (req: Request, res: Response): Promise<void> => {
+  try {
+    const userId = (req as any).user?.userId;
+    const { id: orderId } = req.params;
+
+    if (!userId) {
+      responseUtils.unauthorizedResponse(res, 'User not authenticated');
+      return;
+    }
+
+    // Get order and verify ownership
+    // Don't populate items.product to avoid issues with productId extraction
+    const order = await Order.findById(orderId);
+
+    if (!order) {
+      responseUtils.notFoundResponse(res, 'Order not found');
+      return;
+    }
+
+    // Verify order belongs to user (unless admin)
+    if (order.user.toString() !== userId && (req as any).user?.role !== 'admin') {
+      responseUtils.forbiddenResponse(res, 'Access denied');
+      return;
+    }
+
+    const storeId = order.storeId.toString();
+    const storeIdObj = typeof storeId === 'string' 
+      ? new mongoose.Types.ObjectId(storeId) 
+      : storeId;
+    const store = await Store.findById(storeIdObj);
+    if (!store || !store.isActive) {
+      responseUtils.badRequestResponse(res, 'Store not found or inactive');
+      return;
+    }
+
+    // Get or create cart - ALWAYS clear existing items for reorder
+    // Use findOneAndUpdate to atomically clear items to ensure they're actually removed
+    const clearResult = await Cart.findOneAndUpdate(
+      { userId, storeId: storeIdObj },
+      { $set: { items: [], issues: [] } },
+      { new: true, upsert: true, setDefaultsOnInsert: true }
+    );
+
+    if (!clearResult) {
+      responseUtils.internalServerErrorResponse(res, 'Failed to initialize cart');
+      return;
+    }
+
+    getLogger().info(
+      `Reorder: Cleared existing cart for user ${userId}, store ${storeId}. Cart now has ${clearResult.items.length} items`
+    );
+
+    // Reload cart to get fresh reference (avoid any potential stale data)
+    let cart = await Cart.findOne({ userId, storeId: storeIdObj });
+    if (!cart) {
+      // If cart doesn't exist after clear, create new one
+      cart = new Cart({ userId, storeId: storeIdObj, items: [], issues: [] });
+      await cart.save();
+    }
+
+    // Double-check cart is empty before adding items
+    if (cart.items.length > 0) {
+      getLogger().warn(
+        `Reorder: Cart still has ${cart.items.length} items after clearing. Force clearing with direct update.`
+      );
+      // Use direct update to ensure items are cleared
+      await Cart.updateOne(
+        { _id: cart._id },
+        { $set: { items: [], issues: [] } }
+      );
+      // Reload again
+      cart = await Cart.findOne({ userId, storeId: storeIdObj });
+      if (!cart) {
+        cart = new Cart({ userId, storeId: storeIdObj, items: [], issues: [] });
+        await cart.save();
+      }
+    }
+
+    getLogger().info(
+      `Reorder: Cart verified empty. Starting to add ${order.items.length} order items.`
+    );
+
+    const addedItems: any[] = [];
+    const skippedItems: any[] = [];
+
+    // Process each order item
+    for (const orderItem of order.items) {
+      // Extract productId - handle both populated and non-populated cases
+      let productId: string;
+      if (typeof orderItem.product === 'object' && orderItem.product !== null && '_id' in orderItem.product) {
+        // Product is populated, extract _id
+        productId = (orderItem.product as any)._id?.toString() || String(orderItem.product);
+      } else {
+        // ProductId is already an ObjectId or string
+        productId = String(orderItem.product);
+      }
+      const quantity = orderItem.quantity;
+
+      // Try to get variantSku from order item, or fallback to matching by size/unit
+      let variantSku = orderItem.variantSku;
+      
+      // If variantSku is missing (old orders), try to find variant by size and unit
+      if (!variantSku && orderItem.size !== undefined && orderItem.unit) {
+        getLogger().info(
+          `Reorder: variantSku missing, attempting to find by size/unit - productId: ${productId}, size: ${orderItem.size}, unit: ${orderItem.unit}`
+        );
+      }
+
+      getLogger().info(
+        `Reorder: Processing order item - productId: ${productId}, variantSku: ${variantSku}, quantity: ${quantity}`
+      );
+
+      // Verify product exists
+      const product = await Product.findById(productId);
+      if (!product) {
+        getLogger().warn(`Reorder: Product not found - productId: ${productId}`);
+        skippedItems.push({
+          productId,
+          productName: 'Unknown Product',
+          reason: 'PRODUCT_NOT_FOUND',
+          message: 'Product no longer exists',
+        });
+        continue;
+      }
+
+      // Convert productId to ObjectId if needed
+      const productIdObj = typeof productId === 'string'
+        ? new mongoose.Types.ObjectId(productId)
+        : productId;
+
+      // Verify store product exists and is active
+      const storeProduct = await StoreProduct.findOne({
+        storeId: storeIdObj,
+        productId: productIdObj,
+        isActive: true,
+      });
+
+      if (!storeProduct) {
+        getLogger().warn(
+          `Reorder: StoreProduct not found or inactive - storeId: ${storeId}, productId: ${productId}`
+        );
+        skippedItems.push({
+          productId,
+          productName: product.name,
+          variantSku: variantSku || 'unknown',
+          reason: 'PRODUCT_NOT_AVAILABLE',
+          message: 'Product is not available at this store',
+        });
+        continue;
+      }
+
+      // Find the variant in the store product
+      let variant = variantSku 
+        ? storeProduct.variants.find((v) => v.sku === variantSku)
+        : null;
+
+      // If variant not found by SKU and we have size/unit, try to match by size/unit
+      if (!variant && orderItem.size !== undefined && orderItem.unit) {
+        variant = storeProduct.variants.find(
+          (v) => v.size === orderItem.size && v.unit === orderItem.unit
+        );
+        if (variant) {
+          variantSku = variant.sku; // Update variantSku for later use
+          getLogger().info(
+            `Reorder: Found variant by size/unit match - productId: ${productId}, size: ${orderItem.size}, unit: ${orderItem.unit}, variantSku: ${variantSku}`
+          );
+        }
+      }
+
+      if (!variant) {
+        const availableVariants = storeProduct.variants.map((v: any) => `${v.sku} (${v.size} ${v.unit})`).join(', ');
+        getLogger().warn(
+          `Reorder: Variant not found - productId: ${productId}, variantSku: ${variantSku || 'missing'}, size: ${orderItem.size}, unit: ${orderItem.unit}, available variants: ${availableVariants}`
+        );
+        skippedItems.push({
+          productId,
+          productName: product.name,
+          variantSku: variantSku || 'unknown',
+          reason: 'VARIANT_NOT_FOUND',
+          message: `Product variant not found. Available variants: ${availableVariants}`,
+        });
+        continue;
+      }
+
+      // Ensure variantSku is set (should be set by now from variant.sku)
+      if (!variantSku) {
+        variantSku = variant.sku;
+      }
+
+      getLogger().info(
+        `Reorder: Variant found - productId: ${productId}, variantSku: ${variantSku}, variant: ${JSON.stringify({ sku: variant.sku, size: variant.size, unit: variant.unit })}`
+      );
+
+      // Check stock availability directly from InventoryBatch (don't rely on isAvailable flag)
+      // The isAvailable flag might be stale, so we check actual stock
+      const stockCheck = await checkStockAvailability(
+        storeIdObj.toString(),
+        productIdObj.toString(),
+        variantSku,
+        quantity
+      );
+
+      getLogger().info(
+        `Reorder stock check result for product ${productId}, variant ${variantSku}: Available: ${stockCheck.available}, Required: ${quantity}, Sufficient: ${stockCheck.sufficient}`
+      );
+
+      if (!stockCheck.sufficient) {
+        skippedItems.push({
+          productId,
+          productName: product.name,
+          variantSku,
+          quantity,
+          available: stockCheck.available,
+          reason: 'OUT_OF_STOCK',
+          message: `Insufficient stock. Available: ${stockCheck.available}, Required: ${quantity}`,
+        });
+        continue;
+      }
+
+      // Calculate price snapshot for this item
+      // Note: Cart is already cleared, so no need to check for existing items
+      const sellingPrice = variant.sellingPrice || 0;
+      const originalPrice = variant.mrp || 0;
+      const discount = variant.discount || 0;
+      // Ensure final price is never negative (discount cannot exceed selling price)
+      const finalPrice = Math.max(0, sellingPrice - discount);
+      
+      // Log warning if discount exceeds selling price (data integrity issue)
+      if (discount > sellingPrice) {
+        getLogger().warn(
+          `Discount (${discount}) exceeds selling price (${sellingPrice}) for product ${productId}, variant ${variantSku}. Final price clamped to 0.`
+        );
+      }
+
+      const priceSnapshot = {
+        sellingPrice,
+        originalPrice,
+        discount,
+        finalPrice,
+        snapshotDate: new Date(),
+      };
+
+      // Add item to cart
+      cart.items.push({
+        productId: productIdObj,
+        variantSku,
+        quantity,
+        priceSnapshot,
+      });
+
+      addedItems.push({
+        productId,
+        productName: product.name,
+        variantSku,
+        quantity,
+      });
+    }
+
+    // Mark arrays as modified to ensure Mongoose saves them
+    cart.markModified('items');
+    cart.markModified('issues');
+    
+    // Save cart
+    await cart.save();
+
+    getLogger().info(
+      `Reorder: Cart saved with ${cart.items.length} items after processing ${order.items.length} order items`
+    );
+
+    // Populate and enrich cart items
+    await cart.populate('items.productId');
+    await cart.populate('storeId');
+
+    const enrichedItems = await Promise.all(
+      cart.items.map(async (item: any) => {
+        const sp = await StoreProduct.findOne({
+          storeId,
+          productId: item.productId,
+          variantSku: item.variantSku,
+        }).populate('productId', 'name images');
+
+        return {
+          productId: item.productId,
+          variantSku: item.variantSku,
+          quantity: item.quantity,
+          product: item.productId,
+          storeProduct: sp || null,
+        };
+      })
+    );
+
+    getLogger().info(
+      `Reorder completed for user ${userId}, order ${orderId}: ${addedItems.length} items added, ${skippedItems.length} items skipped`
+    );
+
+    responseUtils.successResponse(res, 'Reorder completed', {
+      cart: {
+        _id: cart._id,
+        userId: cart.userId,
+        storeId: cart.storeId,
+        items: enrichedItems,
+        createdAt: cart.createdAt,
+        updatedAt: cart.updatedAt,
+      },
+      summary: {
+        totalItems: order.items.length,
+        addedItems: addedItems.length,
+        skippedItems: skippedItems.length,
+      },
+      addedItems,
+      skippedItems,
+    });
+  } catch (error: any) {
+    getLogger().error('Reorder error:', error);
+    responseUtils.internalServerErrorResponse(res, error.message || 'Failed to reorder items');
+  }
+};
+
 // Order controller object
 export const orderController = {
   createOrder,
@@ -1306,4 +1907,5 @@ export const orderController = {
   updateOrderStatus,
   assignDeliveryPartner,
   collectPayment,
+  reorder,
 };

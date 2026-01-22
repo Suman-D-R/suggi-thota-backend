@@ -43,6 +43,12 @@ export const envConfig = {
   RAZORPAY_KEY_ID: process.env.RAZORPAY_KEY_ID,
   RAZORPAY_KEY_SECRET: process.env.RAZORPAY_KEY_SECRET,
 
+  // MessageCentral Configuration
+  MESSAGE_CENTRAL_AUTH_KEY: process.env.MESSAGE_CENTRAL_AUTH_KEY,
+  MESSAGE_CENTRAL_CUSTOMER_ID: process.env.MESSAGE_CENTRAL_CUSTOMER_ID,
+  MESSAGE_CENTRAL_SENDER_ID: process.env.MESSAGE_CENTRAL_SENDER_ID || '',
+  MESSAGE_CENTRAL_FLOW_ID: process.env.MESSAGE_CENTRAL_FLOW_ID || '',
+
   // Application Configuration
   FRONTEND_URL: process.env.FRONTEND_URL || 'http://localhost:3000',
   API_URL: process.env.API_URL || 'http://localhost:3000/api',

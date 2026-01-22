@@ -1,6 +1,8 @@
 // Category controller
 import { Response } from 'express';
 import { Category } from '../models/category.model';
+import { StoreProduct } from '../models/storeProduct.model';
+import { InventoryBatch } from '../models/inventoryBatch.model';
 import { responseUtils } from '../utils/response';
 // Lazy import logger to avoid circular dependency
 let logger: any;
@@ -437,12 +439,233 @@ export const hardDeleteCategory = async (req: AuthenticatedRequest, res: Respons
   }
 };
 
+// Get categories with products for a store
+export const getCategoriesWithProducts = async (req: AuthenticatedRequest, res: Response): Promise<void> => {
+  try {
+    const { storeId } = req.query;
+
+    if (!storeId) {
+      responseUtils.badRequestResponse(res, 'Store ID is required');
+      return;
+    }
+
+    if (!mongoose.Types.ObjectId.isValid(storeId as string)) {
+      responseUtils.badRequestResponse(res, 'Invalid store ID');
+      return;
+    }
+
+    const storeIdObj = new mongoose.Types.ObjectId(storeId as string);
+
+    // Get all active store products for this store
+    const storeProducts = await StoreProduct.find({
+      storeId: storeIdObj,
+      isActive: true,
+    })
+      .populate({
+        path: 'productId',
+        select: 'name category description images',
+        populate: {
+          path: 'category',
+          select: 'name',
+        },
+      })
+      .lean();
+
+    // Get all inventory batches for this store to calculate stock
+    const inventoryBatches = await InventoryBatch.find({
+      storeId: storeIdObj,
+      status: 'active',
+    }).lean();
+
+    // Helper function to calculate stock for a variant
+    const calculateVariantStock = (productId: mongoose.Types.ObjectId, variantSku: string): number => {
+      const productIdStr = productId.toString();
+      
+      // Get batches for this product
+      const productBatches = inventoryBatches.filter((batch: any) => {
+        const batchProductId = batch.productId instanceof mongoose.Types.ObjectId 
+          ? batch.productId.toString() 
+          : String(batch.productId);
+        return batchProductId === productIdStr;
+      });
+
+      // Check if product uses shared stock
+      const hasSharedStock = productBatches.some((batch: any) => batch.usesSharedStock === true);
+      
+      if (hasSharedStock) {
+        // Shared stock: Sum all active shared stock batches
+        const sharedBatches = productBatches.filter((batch: any) => {
+          const isExpired = batch.expiryDate && new Date(batch.expiryDate) < new Date();
+          return batch.usesSharedStock === true && batch.status === 'active' && !isExpired;
+        });
+        
+        return sharedBatches.reduce((sum: number, batch: any) => {
+          return sum + (batch.availableQuantity || 0);
+        }, 0);
+      } else {
+        // Non-shared stock: Match by variantSku
+        const variantBatches = productBatches.filter((batch: any) => {
+          const isExpired = batch.expiryDate && new Date(batch.expiryDate) < new Date();
+          return batch.variantSku === variantSku && batch.status === 'active' && !isExpired;
+        });
+        
+        return variantBatches.reduce((sum: number, batch: any) => {
+          return sum + (batch.availableQuantity || 0);
+        }, 0);
+      }
+    };
+
+    // Helper function to enrich a store product
+    const enrichProduct = (storeProduct: any) => {
+      const product = storeProduct.productId;
+      if (!product) return null;
+
+      const productId = product._id || product;
+      const productIdObj = productId instanceof mongoose.Types.ObjectId 
+        ? productId 
+        : new mongoose.Types.ObjectId(productId);
+
+      const enrichedVariants = (storeProduct.variants || []).map((variant: any) => {
+        const stock = calculateVariantStock(productIdObj, variant.sku);
+        const isOutOfStock = stock <= 0;
+
+        return {
+          sku: variant.sku,
+          variantSku: variant.sku,
+          size: variant.size,
+          unit: variant.unit,
+          originalPrice: variant.mrp,
+          sellingPrice: variant.sellingPrice,
+          discount: variant.discount,
+          stock: stock,
+          availableQuantity: stock,
+          isAvailable: variant.isAvailable && !isOutOfStock,
+          isOutOfStock: isOutOfStock,
+          maximumOrderLimit: variant.maximumOrderLimit,
+        };
+      });
+
+      const firstVariant = enrichedVariants.find((v: any) => v.isAvailable) || enrichedVariants[0];
+      const totalStock = enrichedVariants.reduce((sum: number, v: any) => sum + v.stock, 0);
+
+      return {
+        _id: productId,
+        name: product.name,
+        category: product.category,
+        description: product.description,
+        images: product.images || [],
+        variants: enrichedVariants,
+        // Backward compatibility fields
+        originalPrice: firstVariant?.originalPrice || 0,
+        sellingPrice: firstVariant?.sellingPrice || 0,
+        discount: firstVariant?.discount || 0,
+        size: firstVariant?.size || 0,
+        unit: firstVariant?.unit || '',
+        stock: totalStock,
+        availableQuantity: totalStock,
+        isAvailable: enrichedVariants.some((v: any) => v.isAvailable),
+        isOutOfStock: totalStock <= 0,
+        // Store product specific fields
+        isFeatured: storeProduct.isFeatured || false,
+        isActive: storeProduct.isActive !== false,
+      };
+    };
+
+    // Group store products by category
+    const categoryMap = new Map<string, any[]>();
+
+    storeProducts.forEach((storeProduct: any) => {
+      const product = storeProduct.productId;
+      if (!product || !product.category) return;
+
+      const categoryId = product.category._id || product.category;
+      const categoryIdStr = categoryId instanceof mongoose.Types.ObjectId 
+        ? categoryId.toString() 
+        : String(categoryId);
+
+      if (!categoryMap.has(categoryIdStr)) {
+        categoryMap.set(categoryIdStr, []);
+      }
+
+      const enrichedProduct = enrichProduct(storeProduct);
+      if (enrichedProduct && enrichedProduct.isAvailable) {
+        categoryMap.get(categoryIdStr)!.push(enrichedProduct);
+      }
+    });
+
+    // Get category details and select 6 random products per category
+    const categoriesWithProducts: any[] = [];
+
+    for (const [categoryIdStr, products] of categoryMap.entries()) {
+      // Skip categories with no products
+      if (products.length === 0) continue;
+
+      // Get category details
+      const category = await Category.findById(categoryIdStr).select('name').lean();
+      if (!category) continue;
+
+      // Shuffle and get 6 random products (or all if less than 6)
+      const shuffled = [...products].sort(() => Math.random() - 0.5);
+      const randomProducts = shuffled.slice(0, 6);
+
+      categoriesWithProducts.push({
+        _id: category._id,
+        name: category.name,
+        products: randomProducts,
+      });
+    }
+
+    // Sort categories: Vegetables first, then Fruits, then others alphabetically
+    const categoryOrder: { [key: string]: number } = {
+      'vegetables': 1,
+      'vegetable': 1,
+      'fruits': 2,
+      'fruit': 2,
+    };
+
+    categoriesWithProducts.sort((a, b) => {
+      const aName = a.name.toLowerCase();
+      const bName = b.name.toLowerCase();
+      
+      // Check if category name contains keywords
+      const getOrder = (name: string): number => {
+        for (const [keyword, order] of Object.entries(categoryOrder)) {
+          if (name.includes(keyword)) {
+            return order;
+          }
+        }
+        return 999; // Other categories go last
+      };
+
+      const aOrder = getOrder(aName);
+      const bOrder = getOrder(bName);
+
+      if (aOrder !== bOrder) {
+        return aOrder - bOrder;
+      }
+      
+      // If same order, sort alphabetically
+      return a.name.localeCompare(b.name);
+    });
+
+    responseUtils.successResponse(
+      res,
+      'Categories with products retrieved successfully',
+      { categories: categoriesWithProducts }
+    );
+  } catch (error) {
+    getLogger().error('Get categories with products error:', error);
+    responseUtils.internalServerErrorResponse(res, 'Failed to retrieve categories with products');
+  }
+};
+
 // Category controller object
 export const categoryController = {
   getAllCategories,
   getMainCategories,
   getSubcategories,
   getCategoryById,
+  getCategoriesWithProducts,
   createCategory,
   updateCategory,
   deleteCategory,

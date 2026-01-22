@@ -28,8 +28,8 @@ router.get('/', (req: any, res: any) => {
   return orderController.getUserOrders(req, res);
 });
 
-// Get order by ID
-router.get('/:id', orderController.getOrderById as any);
+// Reorder items from a previous order (must be before /:id route)
+router.post('/:id/reorder', orderController.reorder as any);
 
 // Update order status (Admin or Delivery Partner)
 router.put('/:id/status', authenticate as any, orderController.updateOrderStatus as any);
@@ -39,5 +39,8 @@ router.post('/:id/assign-delivery-partner', requireAdmin as any, orderController
 
 // Collect COD payment (Admin/Delivery Partner)
 router.post('/:id/collect-payment', authenticate as any, orderController.collectPayment as any);
+
+// Get order by ID (must be last to avoid conflicts with other /:id routes)
+router.get('/:id', orderController.getOrderById as any);
 
 export default router;

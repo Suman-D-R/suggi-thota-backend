@@ -15,6 +15,83 @@ const getLogger = () => {
   return logger;
 };
 
+// Revalidate cart against current inventory
+export const revalidateCart = async (cart: any) => {
+  const updatedItems: any[] = [];
+  const issues: any[] = [];
+
+  for (const item of cart.items) {
+    const batches = await InventoryBatch.find({
+      storeId: cart.storeId,
+      productId: item.productId,
+      status: 'active',
+      $or: [
+        { usesSharedStock: true },
+        { variantSku: item.variantSku },
+      ],
+    });
+
+    const validBatches = batches.filter((b: any) => {
+      return !b.expiryDate || new Date() <= b.expiryDate;
+    });
+
+    const availableStock = validBatches.reduce(
+      (sum: number, b: any) => sum + (b.availableQuantity || 0),
+      0
+    );
+
+    // ❌ Completely out of stock
+    if (availableStock <= 0) {
+      issues.push({
+        productId: item.productId,
+        variantSku: item.variantSku,
+        reason: 'OUT_OF_STOCK',
+        requestedQuantity: item.quantity,
+        availableQuantity: 0,
+      });
+      continue;
+    }
+
+    // ⚠️ Partial stock available
+    if (availableStock < item.quantity) {
+      issues.push({
+        productId: item.productId,
+        variantSku: item.variantSku,
+        reason: 'QUANTITY_REDUCED',
+        requestedQuantity: item.quantity,
+        availableQuantity: availableStock,
+      });
+
+      // Preserve price snapshot when reducing quantity
+      const reducedItem = {
+        ...item.toObject(),
+        quantity: availableStock,
+      };
+      // Keep existing price snapshot (don't refresh on quantity reduction)
+      if (item.priceSnapshot) {
+        reducedItem.priceSnapshot = item.priceSnapshot;
+      }
+      updatedItems.push(reducedItem);
+      continue;
+    }
+
+    // ✅ Fully available
+    // Preserve price snapshot for fully available items
+    const availableItem = item.toObject();
+    if (item.priceSnapshot) {
+      availableItem.priceSnapshot = item.priceSnapshot;
+    }
+    updatedItems.push(availableItem);
+  }
+
+  cart.items = updatedItems;
+  cart.issues = issues;
+  await cart.save();
+
+  return cart;
+};
+
+
 // Get user's cart
 export const getCart = async (req: Request, res: Response): Promise<void> => {
   try {
@@ -35,12 +112,21 @@ export const getCart = async (req: Request, res: Response): Promise<void> => {
     let cart = await Cart.findOne({ userId, storeId });
 
     if (!cart) {
-      cart = new Cart({ userId, storeId, items: [] });
+      cart = new Cart({ userId, storeId, items: [], issues: [] });
       await cart.save();
+    }
+
+    // 🔥 Revalidate cart here
+    cart = await revalidateCart(cart);
+
+    if (!cart) {
+      responseUtils.internalServerErrorResponse(res, 'Failed to revalidate cart');
+      return;
     }
 
     // Populate product details
     await cart.populate('items.productId');
+    await cart.populate('issues.productId');
     await cart.populate('storeId');
 
     // Enrich items with product and store product details
@@ -72,7 +158,8 @@ export const getCart = async (req: Request, res: Response): Promise<void> => {
 
         // Build product variants array from storeProduct
         const productVariants = storeProduct.variants.map((v: any) => ({
-          sku: v.sku,
+          sku: v.sku, // Keep for backward compatibility
+          variantSku: v.sku, // ⚠️ CRITICAL: Always use variantSku from StoreProduct
           size: v.size,
           unit: v.unit,
           originalPrice: v.mrp,
@@ -81,6 +168,7 @@ export const getCart = async (req: Request, res: Response): Promise<void> => {
           stock: 0, // Stock is managed separately
           isAvailable: v.isAvailable,
           isOutOfStock: !v.isAvailable,
+          maximumOrderLimit: v.maximumOrderLimit,
         }));
 
         // Return in format expected by frontend: { product: {...}, variants: [{...}] }
@@ -102,6 +190,7 @@ export const getCart = async (req: Request, res: Response): Promise<void> => {
           },
           variants: [
             {
+              variantSku: variant.sku, // ⚠️ CRITICAL: Include variantSku so frontend can use it
               size: variant.size,
               unit: variant.unit,
               quantity: item.quantity,
@@ -115,6 +204,49 @@ export const getCart = async (req: Request, res: Response): Promise<void> => {
     // Filter out null items (products that weren't found)
     const validItems = enrichedItems.filter((item: any) => item !== null);
 
+    // Enrich issues with product details
+    const enrichedIssues = await Promise.all(
+      (cart.issues || []).map(async (issue: any) => {
+        const product = await Product.findById(issue.productId);
+        const storeProduct = await StoreProduct.findOne({
+          storeId,
+          productId: issue.productId,
+        }).populate('productId', 'name images');
+
+        if (!product) {
+          getLogger().warn(`Product not found for cart issue: ${issue.productId}`);
+          return {
+            productId: issue.productId?._id || issue.productId?.toString() || issue.productId,
+            variantSku: issue.variantSku,
+            reason: issue.reason,
+            requestedQuantity: issue.requestedQuantity,
+            availableQuantity: issue.availableQuantity,
+            product: null,
+          };
+        }
+
+        // Find the variant in storeProduct
+        const variant = storeProduct?.variants.find((v: any) => v.sku === issue.variantSku);
+
+        return {
+          productId: issue.productId?._id || issue.productId?.toString() || issue.productId,
+          variantSku: issue.variantSku,
+          reason: issue.reason,
+          requestedQuantity: issue.requestedQuantity,
+          availableQuantity: issue.availableQuantity,
+          product: {
+            _id: product._id,
+            name: product.name,
+            images: product.images || [],
+            originalPrice: variant?.mrp || 0,
+            sellingPrice: variant?.sellingPrice || 0,
+            unit: variant?.unit || '',
+            size: variant?.size || 0,
+          },
+        };
+      })
+    );
+
     getLogger().info(`Cart retrieved for user ${userId}, store ${storeId}`);
 
     responseUtils.successResponse(res, 'Cart retrieved successfully', {
@@ -123,6 +255,7 @@ export const getCart = async (req: Request, res: Response): Promise<void> => {
         userId: cart.userId,
         storeId: cart.storeId,
         items: validItems,
+        issues: enrichedIssues,
         createdAt: cart.createdAt,
         updatedAt: cart.updatedAt,
       },
@@ -144,16 +277,14 @@ export const addItem = async (req: Request, res: Response): Promise<void> => {
       return;
     }
 
-    // Construct variantSku from size and unit if not provided
-    let finalVariantSku = variantSku;
-    if (!finalVariantSku && size !== undefined && unit) {
-      finalVariantSku = `${size}_${unit}`;
-    }
-
-    if (!storeId || !productId || !finalVariantSku) {
-      responseUtils.badRequestResponse(res, 'Store ID, product ID, and variant SKU (or size and unit) are required');
+    // ⚠️ CRITICAL: variantSku MUST be provided from the API response
+    // Never construct variantSku from size+unit - always use the variantSku from StoreProduct
+    if (!storeId || !productId || !variantSku) {
+      responseUtils.badRequestResponse(res, 'Store ID, product ID, and variant SKU are required. variantSku must come from the product API response.');
       return;
     }
+
+    const finalVariantSku = variantSku; // Use the variantSku from API
 
     // Verify store exists
     const store = await Store.findById(storeId);
@@ -193,6 +324,27 @@ export const addItem = async (req: Request, res: Response): Promise<void> => {
       return;
     }
 
+    // Get or create cart (needed for maximum order limit check and later for adding item)
+    let cart = await Cart.findOne({ userId, storeId });
+
+    // Check maximum order limit if set
+    if (variant.maximumOrderLimit !== undefined && variant.maximumOrderLimit !== null && variant.maximumOrderLimit > 0) {
+      // Get current quantity in cart for this variant
+      const existingCartItem = cart?.items.find(
+        (item) => item.productId.toString() === productId && item.variantSku === finalVariantSku
+      );
+      const currentQuantity = existingCartItem?.quantity || 0;
+      const newQuantity = currentQuantity + quantity;
+
+      if (newQuantity > variant.maximumOrderLimit) {
+        responseUtils.badRequestResponse(
+          res,
+          `Maximum order limit exceeded. Maximum allowed: ${variant.maximumOrderLimit}, Current: ${currentQuantity}, Requested: ${quantity}`
+        );
+        return;
+      }
+    }
+
     // Check stock from InventoryBatches (stock is not stored in StoreProduct)
     // First, check if product uses shared stock
     const allProductBatches = await InventoryBatch.find({
@@ -228,13 +380,34 @@ export const addItem = async (req: Request, res: Response): Promise<void> => {
       return;
     }
 
-    // Get or create cart
-    let cart = await Cart.findOne({ userId, storeId });
+    // Create cart if it doesn't exist
 
     if (!cart) {
-      cart = new Cart({ userId, storeId, items: [] });
+      cart = new Cart({ userId, storeId, items: [], issues: [] });
       await cart.save();
     }
+
+    // Calculate price snapshot for this item
+    const sellingPrice = variant.sellingPrice || 0;
+    const originalPrice = variant.mrp || 0;
+    const discount = variant.discount || 0;
+    // Ensure final price is never negative (discount cannot exceed selling price)
+    const finalPrice = Math.max(0, sellingPrice - discount);
+    
+    // Log warning if discount exceeds selling price (data integrity issue)
+    if (discount > sellingPrice) {
+      getLogger().warn(
+        `Discount (${discount}) exceeds selling price (${sellingPrice}) for product ${productId}, variant ${finalVariantSku}. Final price clamped to 0.`
+      );
+    }
+
+    const priceSnapshot = {
+      sellingPrice,
+      originalPrice,
+      discount,
+      finalPrice,
+      snapshotDate: new Date(),
+    };
 
     // Check if item already exists in cart
     const existingItemIndex = cart.items.findIndex(
@@ -242,14 +415,16 @@ export const addItem = async (req: Request, res: Response): Promise<void> => {
     );
 
     if (existingItemIndex > -1) {
-      // Update quantity
+      // Update quantity and refresh price snapshot (price may have changed)
       cart.items[existingItemIndex].quantity += quantity;
+      cart.items[existingItemIndex].priceSnapshot = priceSnapshot;
     } else {
-      // Add new item
+      // Add new item with price snapshot
       cart.items.push({
         productId: new (require('mongoose').Types.ObjectId)(productId),
         variantSku: finalVariantSku,
         quantity,
+        priceSnapshot,
       });
     }
 
@@ -308,16 +483,14 @@ export const updateItem = async (req: Request, res: Response): Promise<void> => 
       return;
     }
 
-    // Construct variantSku from size and unit if not provided
-    let finalVariantSku = variantSku;
-    if (!finalVariantSku && size !== undefined && unit) {
-      finalVariantSku = `${size}_${unit}`;
-    }
-
-    if (!storeId || !productId || !finalVariantSku || quantity === undefined) {
-      responseUtils.badRequestResponse(res, 'Store ID, product ID, variant SKU (or size and unit), and quantity are required');
+    // ⚠️ CRITICAL: variantSku MUST be provided from the API response
+    // Never construct variantSku from size+unit - always use the variantSku from StoreProduct
+    if (!storeId || !productId || !variantSku || quantity === undefined) {
+      responseUtils.badRequestResponse(res, 'Store ID, product ID, variant SKU, and quantity are required. variantSku must come from the product API response.');
       return;
     }
+
+    const finalVariantSku = variantSku; // Use the variantSku from API
 
     if (quantity < 0) {
       responseUtils.badRequestResponse(res, 'Quantity cannot be negative');
@@ -363,6 +536,17 @@ export const updateItem = async (req: Request, res: Response): Promise<void> => 
         return;
       }
 
+      // Check maximum order limit if set
+      if (variant.maximumOrderLimit !== undefined && variant.maximumOrderLimit !== null && variant.maximumOrderLimit > 0) {
+        if (quantity > variant.maximumOrderLimit) {
+          responseUtils.badRequestResponse(
+            res,
+            `Maximum order limit exceeded. Maximum allowed: ${variant.maximumOrderLimit}, Requested: ${quantity}`
+          );
+          return;
+        }
+      }
+
       // Check stock from InventoryBatches (stock is not stored in StoreProduct)
       // First, check if product uses shared stock
       const allProductBatches = await InventoryBatch.find({
@@ -398,8 +582,28 @@ export const updateItem = async (req: Request, res: Response): Promise<void> => 
         return;
       }
 
-      // Update quantity
+      // Update quantity and refresh price snapshot (price may have changed)
+      const sellingPrice = variant.sellingPrice || 0;
+      const originalPrice = variant.mrp || 0;
+      const discount = variant.discount || 0;
+      // Ensure final price is never negative (discount cannot exceed selling price)
+      const finalPrice = Math.max(0, sellingPrice - discount);
+      
+      // Log warning if discount exceeds selling price (data integrity issue)
+      if (discount > sellingPrice) {
+        getLogger().warn(
+          `Discount (${discount}) exceeds selling price (${sellingPrice}) for product ${productId}, variant ${finalVariantSku}. Final price clamped to 0.`
+        );
+      }
+
       cart.items[itemIndex].quantity = quantity;
+      cart.items[itemIndex].priceSnapshot = {
+        sellingPrice,
+        originalPrice,
+        discount,
+        finalPrice,
+        snapshotDate: new Date(),
+      };
     }
 
     await cart.save();
@@ -549,6 +753,7 @@ export const clearCart = async (req: Request, res: Response): Promise<void> => {
 
     // Clear cart
     cart.items = [];
+    cart.issues = [];
     await cart.save();
 
     getLogger().info(`Cart cleared for user ${userId}, store ${storeId}`);

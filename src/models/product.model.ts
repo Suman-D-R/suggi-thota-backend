@@ -6,6 +6,7 @@ export interface IProduct extends Document {
   category: mongoose.Types.ObjectId;
   description?: string;
   images: string[];
+  keywords?: string[]; // For search: synonyms, local language terms, common misspellings
 }
 
 const productSchema = new Schema<IProduct>(
@@ -29,12 +30,19 @@ const productSchema = new Schema<IProduct>(
       type: [String],
       required: true,
     },
+    keywords: {
+      type: [String],
+      default: [],
+      index: true,
+    },
   },
   { timestamps: true }
 );
 
-productSchema.index({ name: 'text' });
+// Text search index for name and keywords
+productSchema.index({ name: 'text', keywords: 'text' });
 productSchema.index({ category: 1 });
+productSchema.index({ keywords: 1 });
 
 export const Product = mongoose.model<IProduct>('Product', productSchema);
 export default Product;

@@ -131,6 +131,7 @@ export const createStoreProduct = async (req: AuthenticatedRequest, res: Respons
       sellingPrice: number;
       discount: number;
       isAvailable: boolean;
+      maximumOrderLimit?: number;
     }> = [];
 
     try {
@@ -158,6 +159,9 @@ export const createStoreProduct = async (req: AuthenticatedRequest, res: Respons
             sellingPrice: parseFloat(v.sellingPrice),
             discount: v.discount !== undefined ? Math.round(parseFloat(v.discount) * 100) / 100 : 0,
             isAvailable: v.isAvailable !== undefined ? v.isAvailable : true,
+            maximumOrderLimit: v.maximumOrderLimit !== undefined && v.maximumOrderLimit !== null
+              ? parseFloat(v.maximumOrderLimit)
+              : undefined,
           };
         });
       } else {
@@ -251,6 +255,9 @@ export const updateStoreProduct = async (req: AuthenticatedRequest, res: Respons
               sellingPrice: parseFloat(v.sellingPrice),
               discount: v.discount !== undefined ? Math.round(parseFloat(v.discount) * 100) / 100 : 0,
               isAvailable: v.isAvailable !== undefined ? v.isAvailable : true,
+              maximumOrderLimit: v.maximumOrderLimit !== undefined && v.maximumOrderLimit !== null
+                ? parseFloat(v.maximumOrderLimit)
+                : undefined,
             };
           });
         } else {

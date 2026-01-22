@@ -102,9 +102,16 @@ export const badRequestResponse = (
 // Conflict response
 export const conflictResponse = (
   res: Response,
-  message: string = 'Resource conflict'
+  message: string = 'Resource conflict',
+  additionalData?: Record<string, any>
 ): Response<ApiResponse> => {
-  return errorResponse(res, message, 409);
+  const response: ApiResponse = {
+    success: false,
+    message,
+    ...(additionalData && additionalData),
+  };
+
+  return res.status(409).json(response);
 };
 
 // Internal server error response

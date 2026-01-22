@@ -16,6 +16,9 @@ router.get('/', categoryController.getAllCategories as any);
 // Get main categories
 router.get('/main', categoryController.getMainCategories as any);
 
+// Get categories with products for a store
+router.get('/with-products', categoryController.getCategoriesWithProducts as any);
+
 // Get subcategories by parent
 router.get(
   '/:parentId/subcategories',

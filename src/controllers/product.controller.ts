@@ -205,10 +205,28 @@ export const createProduct = async (req: AuthenticatedRequest, res: Response): P
       category: categoryRaw,
       description,
       images: imagesFromBody,
+      keywords: keywordsRaw,
     } = req.body;
 
     // Handle category - if it's an array (from FormData), take the first value
     const category = Array.isArray(categoryRaw) ? categoryRaw[0] : categoryRaw;
+
+    // Handle keywords - can be string (comma-separated) or array
+    let keywords: string[] = [];
+    if (keywordsRaw) {
+      if (typeof keywordsRaw === 'string') {
+        // Parse comma-separated string or JSON string
+        try {
+          const parsed = JSON.parse(keywordsRaw);
+          keywords = Array.isArray(parsed) ? parsed : keywordsRaw.split(',').map((k: string) => k.trim()).filter((k: string) => k.length > 0);
+        } catch {
+          // Not JSON, treat as comma-separated string
+          keywords = keywordsRaw.split(',').map((k: string) => k.trim()).filter((k: string) => k.length > 0);
+        }
+      } else if (Array.isArray(keywordsRaw)) {
+        keywords = keywordsRaw.map((k: string) => String(k).trim()).filter((k: string) => k.length > 0);
+      }
+    }
 
     // Get uploaded image URLs from multer
     let images: string[] = [];
@@ -270,6 +288,10 @@ export const createProduct = async (req: AuthenticatedRequest, res: Response): P
       productData.description = description;
     }
 
+    if (keywords.length > 0) {
+      productData.keywords = keywords;
+    }
+
     const product = new Product(productData);
 
     await product.save();
@@ -311,10 +333,31 @@ export const updateProduct = async (req: AuthenticatedRequest, res: Response): P
       category: categoryRaw,
       description,
       images: imagesFromBody,
+      existingImages: existingImagesRaw,
+      keywords: keywordsRaw,
     } = req.body;
 
     // Handle category - if it's an array (from FormData), take the first value
     const category = Array.isArray(categoryRaw) ? categoryRaw[0] : categoryRaw;
+
+    // Handle keywords - can be string (comma-separated) or array
+    if (keywordsRaw !== undefined) {
+      let keywords: string[] = [];
+      if (typeof keywordsRaw === 'string') {
+        // Parse comma-separated string or JSON string
+        try {
+          const parsed = JSON.parse(keywordsRaw);
+          keywords = Array.isArray(parsed) ? parsed : keywordsRaw.split(',').map((k: string) => k.trim()).filter((k: string) => k.length > 0);
+        } catch {
+          // Not JSON, treat as comma-separated string
+          keywords = keywordsRaw.split(',').map((k: string) => k.trim()).filter((k: string) => k.length > 0);
+        }
+      } else if (Array.isArray(keywordsRaw)) {
+        keywords = keywordsRaw.map((k: string) => String(k).trim()).filter((k: string) => k.length > 0);
+      }
+      // If keywordsRaw is empty string or empty array, set to empty array
+      product.keywords = keywords;
+    }
 
     // Get uploaded image URLs from multer (if any new files uploaded)
     let newImages: string[] = [];
@@ -366,8 +409,28 @@ export const updateProduct = async (req: AuthenticatedRequest, res: Response): P
         await deleteOldImagesFromS3(product.images);
       }
       product.images = newImages;
+    } else if (existingImagesRaw !== undefined) {
+      // Handle existing images sent as JSON string (when updating without new files)
+      let existingImages: string[] = [];
+      if (typeof existingImagesRaw === 'string') {
+        try {
+          const parsed = JSON.parse(existingImagesRaw);
+          existingImages = Array.isArray(parsed) ? parsed : [];
+        } catch {
+          // Not valid JSON, treat as empty
+          existingImages = [];
+        }
+      } else if (Array.isArray(existingImagesRaw)) {
+        existingImages = existingImagesRaw;
+      }
+      
+      if (existingImages.length === 0) {
+        responseUtils.badRequestResponse(res, 'At least one image is required');
+        return;
+      }
+      product.images = existingImages;
     } else if (imagesFromBody !== undefined) {
-      // Update images from body if provided
+      // Update images from body if provided (fallback for other formats)
       const updatedImages = Array.isArray(imagesFromBody) ? imagesFromBody : [imagesFromBody];
       if (updatedImages.length === 0) {
         responseUtils.badRequestResponse(res, 'At least one image is required');
@@ -375,6 +438,7 @@ export const updateProduct = async (req: AuthenticatedRequest, res: Response): P
       }
       product.images = updatedImages;
     }
+    // If none of the above, existing images are preserved (no update to images field)
 
     await product.save();
 
@@ -640,7 +704,8 @@ export const getProductsByLocation = async (req: AuthenticatedRequest, res: Resp
         const isOutOfStock = stock <= 0;
 
         return {
-          sku: variant.sku,
+          sku: variant.sku, // Keep sku for backward compatibility
+          variantSku: variant.sku, // ⚠️ CRITICAL: Always use variantSku from StoreProduct, never construct it
           size: variant.size,
           unit: variant.unit,
           originalPrice: variant.mrp,
@@ -649,6 +714,7 @@ export const getProductsByLocation = async (req: AuthenticatedRequest, res: Resp
           stock: stock,
           isAvailable: variant.isAvailable && !isOutOfStock,
           isOutOfStock: isOutOfStock,
+          maximumOrderLimit: variant.maximumOrderLimit,
         };
       });
 
@@ -710,6 +776,289 @@ export const getProductsByLocation = async (req: AuthenticatedRequest, res: Resp
   }
 };
 
+// Location-based search API
+// Returns 2 arrays: searchProducts (matching query) and relatedProducts (same category)
+export const searchProductsByLocation = async (req: AuthenticatedRequest, res: Response): Promise<void> => {
+  try {
+    const lng = parseFloat(req.query.lng as string);
+    const lat = parseFloat(req.query.lat as string);
+    const maxDistance = parseFloat(req.query.maxDistance as string) || 10; // km
+    const searchQuery = (req.query.q as string || req.query.search as string || '').trim().toLowerCase();
+    const limit = parseInt(req.query.limit as string) || 20;
+
+    if (isNaN(lng) || isNaN(lat)) {
+      responseUtils.badRequestResponse(res, 'Valid lng and lat query parameters are required');
+      return;
+    }
+
+    if (!searchQuery || searchQuery.length === 0) {
+      responseUtils.badRequestResponse(res, 'Search query (q or search) is required');
+      return;
+    }
+
+    // Find nearby stores
+    const { Store } = require('../models/store.model');
+    const { InventoryBatch } = require('../models/inventoryBatch.model');
+    const stores = await Store.find({
+      location: {
+        $near: {
+          $geometry: {
+            type: 'Point',
+            coordinates: [lng, lat],
+          },
+          $maxDistance: maxDistance * 1000, // Convert km to meters
+        },
+      },
+      isActive: true,
+    }).lean();
+
+    if (!stores || stores.length === 0) {
+      responseUtils.successResponse(res, 'No stores available at this location', {
+        searchProducts: [],
+        relatedProducts: [],
+        store: null,
+        hasStore: false,
+      });
+      return;
+    }
+
+    // Use the nearest store (first result from $near query)
+    const nearestStore = stores[0];
+    const storeId = nearestStore._id;
+
+    // Get store products for this store with populated product data
+    const { StoreProduct } = require('../models/storeProduct.model');
+    const storeProducts = await StoreProduct.find({
+      storeId: storeId,
+      isActive: true,
+    })
+      .populate('productId', 'name images category description keywords')
+      .lean();
+
+    if (!storeProducts || storeProducts.length === 0) {
+      responseUtils.successResponse(res, 'No products available at this store', {
+        searchProducts: [],
+        relatedProducts: [],
+        store: {
+          _id: nearestStore._id,
+          name: nearestStore.name,
+          location: nearestStore.location,
+        },
+        hasStore: true,
+      });
+      return;
+    }
+
+    // Get all product IDs from store products
+    const productIds = storeProducts.map((sp: any) => {
+      const productId = sp.productId._id || sp.productId;
+      return productId instanceof mongoose.Types.ObjectId ? productId : new mongoose.Types.ObjectId(productId);
+    });
+
+    // Get all inventory batches for these products in this store
+    const inventoryBatches = await InventoryBatch.find({
+      storeId: storeId,
+      productId: { $in: productIds },
+      status: 'active',
+    }).lean();
+
+    // Helper function to calculate stock for a variant
+    const calculateVariantStock = (productId: mongoose.Types.ObjectId, variantSku: string): number => {
+      const productIdStr = productId.toString();
+      
+      const productBatches = inventoryBatches.filter((batch: any) => {
+        const batchProductId = batch.productId instanceof mongoose.Types.ObjectId 
+          ? batch.productId.toString() 
+          : String(batch.productId);
+        return batchProductId === productIdStr;
+      });
+
+      const hasSharedStock = productBatches.some((batch: any) => batch.usesSharedStock === true);
+      
+      if (hasSharedStock) {
+        const sharedBatches = productBatches.filter((batch: any) => {
+          const isExpired = batch.expiryDate && new Date(batch.expiryDate) < new Date();
+          return batch.usesSharedStock === true && batch.status === 'active' && !isExpired;
+        });
+        
+        return sharedBatches.reduce((sum: number, batch: any) => {
+          return sum + (batch.availableQuantity || 0);
+        }, 0);
+      } else {
+        const variantBatches = productBatches.filter((batch: any) => {
+          const isExpired = batch.expiryDate && new Date(batch.expiryDate) < new Date();
+          return batch.variantSku === variantSku && batch.status === 'active' && !isExpired;
+        });
+        
+        return variantBatches.reduce((sum: number, batch: any) => {
+          return sum + (batch.availableQuantity || 0);
+        }, 0);
+      }
+    };
+
+    // Smart search function - supports exact match, partial match, misspellings, keywords
+    const matchesSearch = (product: any, query: string): boolean => {
+      if (!product || !product.productId) return false;
+
+      const productName = (product.productId.name || '').toLowerCase();
+      const productDescription = (product.productId.description || '').toLowerCase();
+      const keywords = (product.productId.keywords || []).map((k: string) => k.toLowerCase());
+
+      // Exact match (highest priority)
+      if (productName === query) return true;
+
+      // Partial match in name
+      if (productName.includes(query)) return true;
+
+      // Keyword match
+      if (keywords.some((keyword: string) => keyword.includes(query) || query.includes(keyword))) {
+        return true;
+      }
+
+      // Partial match in description
+      if (productDescription.includes(query)) return true;
+
+      // Fuzzy match - check if query is contained in name (handles misspellings partially)
+      const nameWords = productName.split(/\s+/);
+      const queryWords = query.split(/\s+/);
+      
+      // Check if any query word matches any name word (handles partial matches)
+      for (const queryWord of queryWords) {
+        for (const nameWord of nameWords) {
+          if (nameWord.includes(queryWord) || queryWord.includes(nameWord)) {
+            return true;
+          }
+        }
+      }
+
+      return false;
+    };
+
+    // Filter products by search query
+    const searchResults = storeProducts.filter((sp: any) => matchesSearch(sp, searchQuery));
+
+    // Enrich products with pricing and stock information
+    const enrichProduct = (storeProduct: any) => {
+      const product = storeProduct.productId;
+      const productId = product._id || product;
+      const productIdObj = productId instanceof mongoose.Types.ObjectId 
+        ? productId 
+        : new mongoose.Types.ObjectId(productId);
+
+      const enrichedVariants = storeProduct.variants.map((variant: any) => {
+        const stock = calculateVariantStock(productIdObj, variant.sku);
+        const isOutOfStock = stock <= 0;
+
+        return {
+          sku: variant.sku,
+          variantSku: variant.sku,
+          size: variant.size,
+          unit: variant.unit,
+          originalPrice: variant.mrp,
+          sellingPrice: variant.sellingPrice,
+          discount: variant.discount,
+          stock: stock,
+          availableQuantity: stock,
+          isAvailable: variant.isAvailable && !isOutOfStock,
+          isOutOfStock: isOutOfStock,
+          maximumOrderLimit: variant.maximumOrderLimit,
+        };
+      });
+
+      const firstVariant = enrichedVariants.find((v: any) => v.isAvailable) || enrichedVariants[0];
+      const totalStock = enrichedVariants.reduce((sum: number, v: any) => sum + v.stock, 0);
+
+      return {
+        _id: productId,
+        name: product.name,
+        category: product.category,
+        description: product.description,
+        images: product.images || [],
+        variants: enrichedVariants,
+        // Backward compatibility fields
+        originalPrice: firstVariant?.originalPrice || 0,
+        sellingPrice: firstVariant?.sellingPrice || 0,
+        discount: firstVariant?.discount || 0,
+        size: firstVariant?.size || 0,
+        unit: firstVariant?.unit || '',
+        stock: totalStock,
+        availableQuantity: totalStock,
+        isAvailable: enrichedVariants.some((v: any) => v.isAvailable),
+        isOutOfStock: totalStock <= 0,
+        // Store product specific fields
+        isFeatured: storeProduct.isFeatured || false,
+        isActive: storeProduct.isActive !== false,
+      };
+    };
+
+    // Enrich search results
+    const searchProducts = searchResults
+      .map(enrichProduct)
+      .filter((p: any) => p.isAvailable) // Only return available products
+      .slice(0, limit);
+
+    // Get unique category IDs from search results
+    const searchCategoryIds = new Set<string>();
+    searchProducts.forEach((product: any) => {
+      const categoryId = product.category;
+      if (categoryId) {
+        const categoryIdStr = typeof categoryId === 'string' 
+          ? categoryId 
+          : (categoryId._id ? categoryId._id.toString() : categoryId.toString());
+        searchCategoryIds.add(categoryIdStr);
+      }
+    });
+
+    // Get related products (same category, excluding search results)
+    const searchProductIds = new Set(searchProducts.map((p: any) => p._id.toString()));
+    const relatedStoreProducts = storeProducts
+      .filter((sp: any) => {
+        // Exclude products already in search results
+        const productId = sp.productId._id || sp.productId;
+        const productIdStr = productId instanceof mongoose.Types.ObjectId 
+          ? productId.toString() 
+          : String(productId);
+        if (searchProductIds.has(productIdStr)) return false;
+
+        // Check if product is in same category as search results
+        const productCategory = sp.productId.category;
+        if (!productCategory) return false;
+
+        const categoryIdStr = typeof productCategory === 'string'
+          ? productCategory
+          : (productCategory._id ? productCategory._id.toString() : productCategory.toString());
+        
+        return searchCategoryIds.has(categoryIdStr);
+      })
+      .map(enrichProduct)
+      .filter((p: any) => p.isAvailable) // Only return available products
+      .slice(0, limit);
+
+    // Populate categories
+    const populatedSearchProducts = await populateCategories(searchProducts);
+    const populatedRelatedProducts = await populateCategories(relatedStoreProducts);
+
+    responseUtils.successResponse(
+      res,
+      'Search completed successfully',
+      {
+        searchProducts: populatedSearchProducts,
+        relatedProducts: populatedRelatedProducts,
+        store: {
+          _id: nearestStore._id,
+          name: nearestStore.name,
+          location: nearestStore.location,
+        },
+        hasStore: true,
+        query: searchQuery,
+      }
+    );
+  } catch (error) {
+    getLogger().error('Search products by location error:', error);
+    responseUtils.internalServerErrorResponse(res, 'Failed to search products');
+  }
+};
+
 // Product controller object
 export const productController = {
   getAllProducts,
@@ -720,4 +1069,5 @@ export const productController = {
   hardDeleteProduct,
   getProductsStats,
   getProductsByLocation,
+  searchProductsByLocation,
 };

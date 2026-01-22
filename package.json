@@ -13,7 +13,8 @@
     "lint:fix": "eslint src/**/*.ts --fix",
     "create-admin": "ts-node src/scripts/createAdmin.ts",
     "seed-categories": "ts-node src/scripts/seedCategories.ts",
-    "create-store-index": "ts-node src/scripts/createStoreIndex.ts"
+    "create-store-index": "ts-node src/scripts/createStoreIndex.ts",
+    "test-messagecentral": "ts-node src/scripts/testMessageCentral.ts"
   },
   "keywords": [
     "grocery",

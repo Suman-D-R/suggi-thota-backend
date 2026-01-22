@@ -9,6 +9,16 @@ import { uploadProductImages } from '../middlewares/upload.middleware';
 const router = Router();
 
 // Public routes (no auth required for browsing)
+// Search products by location (must come before location route)
+router.get(
+  '/search',
+  validators.paginationValidation.limit(),
+  validators.searchValidation('q'),
+  validators.searchValidation('search'),
+  validationMiddlewares.handleValidationErrors,
+  productController.searchProductsByLocation as any
+);
+
 // Get products by location (must come before general products route)
 router.get(
   '/location',

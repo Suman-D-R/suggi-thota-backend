@@ -125,8 +125,12 @@ export const catchAsync = (fn: Function) => {
 
 // Handle 404 errors
 export const notFoundHandler = (req: Request, res: Response, next: NextFunction): void => {
-  // Silently ignore Next.js HMR requests in development
-  if (req.path.startsWith('/_next/')) {
+  // Silently ignore Next.js dev mode requests (HMR, error overlay, etc.)
+  if (
+    req.path.startsWith('/_next/') ||
+    req.path.startsWith('/__nextjs_original-stack-frame') ||
+    req.path.startsWith('/__webpack')
+  ) {
     res.status(404).json({
       success: false,
       message: 'Not found',
