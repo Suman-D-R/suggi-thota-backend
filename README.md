@@ -27,7 +27,7 @@ A production-ready backend API for the Vitura grocery delivery application, buil
 
 ### Communication Services
 - **Email Notifications**: Welcome emails, order confirmations, password resets
-- **Phone Authentication**: OTP via MessageCentral API (with Firebase fallback)
+- **Phone Authentication**: OTP generation and verification (6-digit OTP returned in API response)
 - **WhatsApp Integration**: Business messaging for order updates
 - **Push Notifications**: Firebase Cloud Messaging integration
 
@@ -48,7 +48,7 @@ A production-ready backend API for the Vitura grocery delivery application, buil
 - **Authentication**: JWT (JSON Web Tokens)
 - **File Storage**: AWS S3
 - **Email**: Nodemailer
-- **Phone Authentication**: MessageCentral API for OTP delivery
+- **Phone Authentication**: 6-digit OTP generation and verification (returned in API response for testing)
 - **Push Notifications**: Firebase Cloud Messaging
 - **Payment**: Razorpay
 - **Validation**: Express Validator
@@ -177,11 +177,8 @@ src/
    RAZORPAY_KEY_ID=your-razorpay-key
    RAZORPAY_KEY_SECRET=your-razorpay-secret
 
-   # MessageCentral (for OTP and SMS notifications)
-   MESSAGE_CENTRAL_AUTH_KEY=your-messagecentral-auth-key
-   MESSAGE_CENTRAL_CUSTOMER_ID=your-messagecentral-customer-id
-   MESSAGE_CENTRAL_SENDER_ID=your-sender-id (optional)
-   MESSAGE_CENTRAL_FLOW_ID=your-flow-id (optional, for template-based messages)
+   # Note: OTP is generated and returned in API response for testing
+   # SMS service integration can be added later if needed
    ```
 
 4. **Start MongoDB**

@@ -8,8 +8,6 @@ interface StoredOTP extends OTPData {
   createdAt: Date;
   sessionInfo?: string; // For Firebase OTP
   isFirebaseOTP?: boolean; // Flag to indicate Firebase OTP
-  verificationId?: string; // For MessageCentral OTP
-  isMessageCentralOTP?: boolean; // Flag to indicate MessageCentral OTP
 }
 
 // In-memory OTP storage
@@ -79,29 +77,6 @@ export const storeFirebaseSession = (phoneNumber: string, sessionInfo: string): 
   
   otpStore.set(phoneNumber, storedOTP);
   logger.info(`Firebase session stored for ${phoneNumber}, expires at ${storedOTP.expiresAt}, hadExistingSession: ${hadExistingSession}`);
-};
-
-// Store MessageCentral verificationId for OTP verification
-export const storeMessageCentralVerification = (phoneNumber: string, verificationId: string): void => {
-  // Clear any existing OTP for this phone number first
-  const hadExistingVerification = otpStore.has(phoneNumber);
-  if (hadExistingVerification) {
-    logger.info(`Clearing existing MessageCentral verification for ${phoneNumber} before storing new one`);
-    otpStore.delete(phoneNumber);
-  }
-  
-  const storedOTP: StoredOTP = {
-    otp: '', // No OTP stored, MessageCentral generates it
-    expiresAt: new Date(Date.now() + 10 * 60 * 1000), // 10 minutes
-    attempts: 0,
-    phoneNumber,
-    createdAt: new Date(),
-    verificationId,
-    isMessageCentralOTP: true,
-  };
-  
-  otpStore.set(phoneNumber, storedOTP);
-  logger.info(`MessageCentral verification stored for ${phoneNumber}, expires at ${storedOTP.expiresAt}, verificationId: ${verificationId}`);
 };
 
 // Get stored OTP for a phone number
@@ -176,7 +151,6 @@ export const clearAllOTPs = (): void => {
 export const otpService = {
   generateAndStoreOTP,
   storeFirebaseSession,
-  storeMessageCentralVerification,
   getStoredOTP,
   verifyStoredOTP,
   deleteOTP,
